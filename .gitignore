@@ -14,6 +14,7 @@ docs/
 
 # Claude Code
 .claude/
+CLAUDE.md
 
 # Data (CSV 원본은 WSL ~/bidcompass_data/에 보관)
 data/
