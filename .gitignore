@@ -1,0 +1,25 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Docs (원본 PDF/엑셀/변환 파일)
+docs/
+
+# Claude Code
+.claude/
+
+# Data (CSV 원본은 WSL ~/bidcompass_data/에 보관)
+data/
+
+# Environment
+.env
+
+# macOS
+.DS_Store
