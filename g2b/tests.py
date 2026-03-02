@@ -1,7 +1,7 @@
 """
 BidCompass 코어엔진 테스트 스위트
 
-7개 클래스, SimpleTestCase (DB 불필요):
+9개 클래스, SimpleTestCase (DB 불필요):
   - TestRoundingHelpers
   - TestSelectTable
   - TestCalculateAValue
@@ -9,6 +9,8 @@ BidCompass 코어엔진 테스트 스위트
   - TestCalcPriceScore
   - TestGetFloorRate
   - TestBidAnalysisEngine
+  - TestAssessmentRateFormula (BC-29)
+  - TestOptimalBid (BC-33)
 """
 
 from decimal import Decimal
@@ -19,6 +21,7 @@ from g2b.services.bid_engine import (
     AValueItems,
     BidAnalysisEngine,
     ExclusionStatus,
+    TABLE_PARAMS_MAP,
     TableType,
     WorkType,
     calc_price_score,
@@ -543,3 +546,269 @@ class TestBidAnalysisEngine(SimpleTestCase):
         result = engine.analyze()
 
         self.assertEqual(result.table_type, TableType.TABLE_2B)
+
+
+class TestAssessmentRateFormula(SimpleTestCase):
+    """BC-29: 사정률 역산 공식 단위 테스트."""
+
+    def test_implied_floor_rate(self):
+        """implied 하한율 = 1순위금액 x 100 / (기초금액 x 1순위사정률)"""
+        rank1_bid = 568_453_530
+        base_amt = 626_664_000
+        rank1_rate = Decimal("100.5955")
+        # 곱셈 먼저, 나눗셈 1회 (정밀도 최적화)
+        implied = (Decimal(str(rank1_bid)) * Decimal("100")) / (
+            Decimal(str(base_amt)) * rank1_rate
+        )
+        # 합리적 범위 (0.80 ~ 0.95)
+        self.assertGreater(implied, Decimal("0.80"))
+        self.assertLess(implied, Decimal("0.95"))
+
+    def test_implied_floor_sanity_check(self):
+        """implied로 1순위사정률 역산 -> 원래 값과 일치 (파싱 검증)"""
+        rank1_bid = 568_453_530
+        base_amt = 626_664_000
+        rank1_rate = Decimal("100.5955")
+        implied = (Decimal(str(rank1_bid)) * Decimal("100")) / (
+            Decimal(str(base_amt)) * rank1_rate
+        )
+        # 역산: rate = bid x 100 / (base x implied)
+        recalc = (Decimal(str(rank1_bid)) * Decimal("100")) / (
+            Decimal(str(base_amt)) * implied
+        )
+        self.assertAlmostEqual(float(recalc), float(rank1_rate), places=4)
+
+    def test_assessment_rate_calc(self):
+        """사정률 = 투찰금액 x 100 / (기초금액 x 하한율)
+        자기 일관성 검증: 깔끔한 값으로 공식 정확성 확인."""
+        my_bid = 891_000_000
+        base_amt = 1_000_000_000
+        floor_rate = Decimal("0.9")
+        calc = (Decimal(str(my_bid)) * Decimal("100")) / (
+            Decimal(str(base_amt)) * floor_rate
+        )
+        self.assertAlmostEqual(float(calc), 99.0, places=4)
+
+    def test_reverse_formula(self):
+        """역산: 투찰금액 = 기초금액 x 사정률 x 하한율 / 100
+        delta=1: 원 단위 정밀도 목표 (실무 투찰은 원 단위)."""
+        base_amt = 1_000_000_000
+        rate = Decimal("99")
+        floor = Decimal("0.9")
+        calc_bid = Decimal(str(base_amt)) * rate * floor / Decimal("100")
+        self.assertAlmostEqual(float(calc_bid), 891_000_000, delta=1)
+
+    def test_parse_amount_comma_string(self):
+        """콤마 포함 문자열 -> int."""
+        from g2b.management.commands.verify_assessment_rate import parse_amount
+
+        self.assertEqual(parse_amount("625,594,000"), 625594000)
+        self.assertEqual(parse_amount(626664000.0), 626664000)
+        self.assertIsNone(parse_amount(None))
+        self.assertIsNone(parse_amount(""))
+
+
+class TestOptimalBid(SimpleTestCase):
+    """BC-33: 최적투찰 엔진 테스트."""
+
+    def setUp(self):
+        from g2b.services.optimal_bid import (
+            OptimalBidInput,
+            generate_scenarios,
+            compute_expected_score,
+            find_optimal_bid,
+            evaluate_bid,
+            _score_fast,
+            _round_half_up_float,
+        )
+        self.generate_scenarios = generate_scenarios
+        self.compute_expected_score = compute_expected_score
+        self.find_optimal_bid = find_optimal_bid
+        self.evaluate_bid = evaluate_bid
+        self._score_fast = _score_fast
+        self._round_half_up_float = _round_half_up_float
+        self.OptimalBidInput = OptimalBidInput
+
+    # ── generate_scenarios ──
+
+    def test_scenarios_15_gives_1365(self):
+        """15개 예비가격 → C(15,4)=1,365개 시나리오."""
+        prices = [100_000_000 + i * 1_000_000 for i in range(15)]
+        scenarios = self.generate_scenarios(prices)
+        self.assertEqual(len(scenarios), 1365)
+
+    def test_scenarios_4_gives_1(self):
+        """4개 예비가격 → C(4,4)=1개 시나리오."""
+        prices = [100_000_000, 101_000_000, 102_000_000, 103_000_000]
+        scenarios = self.generate_scenarios(prices)
+        self.assertEqual(len(scenarios), 1)
+
+    def test_scenarios_under_4_raises(self):
+        """3개 미만 → ValueError."""
+        with self.assertRaises(ValueError):
+            self.generate_scenarios([100, 200, 300])
+
+    def test_scenarios_floor_rounding(self):
+        """floor 반올림 확인: 4개 합이 4로 나누어지지 않을 때."""
+        # 합=403 → 403/4=100.75 → floor=100
+        prices = [100, 101, 101, 101]
+        scenarios = self.generate_scenarios(prices)
+        self.assertEqual(len(scenarios), 1)
+        self.assertEqual(scenarios[0], 100)  # floor(100.75)
+
+    def test_scenarios_exact_division(self):
+        """정확히 나누어지는 경우."""
+        prices = [100, 100, 100, 100]
+        scenarios = self.generate_scenarios(prices)
+        self.assertEqual(scenarios[0], 100)  # 400/4=100 (정확)
+
+    # ── _round_half_up_float ──
+
+    def test_round_half_up_float_basic(self):
+        self.assertEqual(self._round_half_up_float(0.12345, 4), 0.1235)
+
+    def test_round_half_up_float_five(self):
+        """0.5 올림 (banker's rounding 아님)."""
+        self.assertEqual(self._round_half_up_float(0.8955, 3), 0.896)
+
+    # ── compute_expected_score ──
+
+    def test_single_scenario_matches_calc_price_score(self):
+        """단일 시나리오 기대점수 = calc_price_score 결과와 일치."""
+        est = 5 * UNIT_EOUK
+        a = 5000_0000
+        bid = int((est - a) * 0.9 + a)
+
+        # calc_price_score (Decimal 기반)
+        result = calc_price_score(bid, est, a, TableType.TABLE_3)
+        decimal_score = float(result.score)
+
+        # compute_expected_score (float 기반, 단일 시나리오)
+        params = TABLE_PARAMS_MAP[TableType.TABLE_3]
+        expected = self.compute_expected_score(
+            bid, [est], a,
+            float(params.max_score), float(params.coeff),
+            float(params.fixed_ratio), float(params.fixed_score),
+        )
+
+        self.assertAlmostEqual(expected, decimal_score, places=1)
+
+    # ── find_optimal_bid ──
+
+    def test_find_optimal_bid_basic(self):
+        """기본 구조 검증 — 결과 타입, 필드."""
+        from g2b.services.optimal_bid import OptimalBidResult
+        prices = [500_000_000 + i * 500_000 for i in range(15)]
+        inp = self.OptimalBidInput(
+            preliminary_prices=prices,
+            a_value=5000_0000,
+            table_type=TableType.TABLE_3,
+            presume_price=5 * UNIT_EOUK,
+        )
+        result = self.find_optimal_bid(inp)
+        self.assertIsInstance(result, OptimalBidResult)
+        self.assertEqual(result.n_scenarios, 1365)
+        self.assertGreater(result.recommended_bid, 0)
+        self.assertGreater(result.expected_score, 2.0)
+        self.assertGreater(result.scan_steps, 0)
+        self.assertLessEqual(result.min_scenario_score, result.max_scenario_score)
+        self.assertIsNone(result.floor_bid)
+
+    def test_find_optimal_bid_a_zero(self):
+        """A=0 케이스 — ratio=bid/est 직접 계산."""
+        prices = [500_000_000 + i * 500_000 for i in range(15)]
+        inp = self.OptimalBidInput(
+            preliminary_prices=prices,
+            a_value=0,
+            table_type=TableType.TABLE_3,
+            presume_price=5 * UNIT_EOUK,
+        )
+        result = self.find_optimal_bid(inp)
+        self.assertGreater(result.expected_score, 2.0)
+        self.assertGreater(result.recommended_bid, 0)
+
+    def test_find_optimal_bid_net_cost_floor(self):
+        """순공사원가 하한 적용."""
+        prices = [500_000_000 + i * 500_000 for i in range(15)]
+        inp = self.OptimalBidInput(
+            preliminary_prices=prices,
+            a_value=5000_0000,
+            table_type=TableType.TABLE_3,
+            presume_price=5 * UNIT_EOUK,
+            net_construction_cost=490_000_000,  # 98% = 480,200,000
+        )
+        result = self.find_optimal_bid(inp)
+        self.assertIsNotNone(result.floor_bid)
+        self.assertGreaterEqual(result.recommended_bid, result.floor_bid)
+
+    def test_find_optimal_bid_4_prices_single_scenario(self):
+        """4개 예비가격 → 1 시나리오 → ratio=0.9 근처 최적."""
+        est_target = 500_000_000
+        # 4개 동일 → 1 시나리오, est=500M
+        prices = [est_target] * 4
+        inp = self.OptimalBidInput(
+            preliminary_prices=prices,
+            a_value=5000_0000,
+            table_type=TableType.TABLE_3,
+            presume_price=5 * UNIT_EOUK,
+        )
+        result = self.find_optimal_bid(inp)
+        self.assertEqual(result.n_scenarios, 1)
+        # 최적 bid는 ratio=0.9 근처여야
+        optimal_at_09 = int(5000_0000 + 0.9 * (est_target - 5000_0000))
+        # 1K step 스캔이므로 ±1K 이내 정밀도, ratio=0.9 근처
+        self.assertAlmostEqual(
+            result.recommended_bid, optimal_at_09, delta=50_000,
+        )
+
+    def test_optimal_bid_beats_arbitrary(self):
+        """최적 bid ≥ 임의 bid (기대점수 비교)."""
+        prices = [500_000_000 + i * 500_000 for i in range(15)]
+        inp = self.OptimalBidInput(
+            preliminary_prices=prices,
+            a_value=5000_0000,
+            table_type=TableType.TABLE_3,
+            presume_price=5 * UNIT_EOUK,
+        )
+        result = self.find_optimal_bid(inp)
+
+        # 임의 bid로 기대점수 계산
+        arbitrary_bid = int(5000_0000 + 0.88 * (500_000_000 - 5000_0000))
+        params = TABLE_PARAMS_MAP[TableType.TABLE_3]
+        scenarios = self.generate_scenarios(prices)
+        arb_score = self.compute_expected_score(
+            arbitrary_bid, scenarios, 5000_0000,
+            float(params.max_score), float(params.coeff),
+            float(params.fixed_ratio), float(params.fixed_score),
+        )
+        self.assertGreaterEqual(result.expected_score, arb_score)
+
+    # ── evaluate_bid ──
+
+    def test_evaluate_bid_decimal_consistency(self):
+        """Decimal 정합성 — evaluate_bid와 calc_price_score 일치."""
+        est = 5 * UNIT_EOUK
+        a = 5000_0000
+        bid = int((est - a) * 0.9 + a)
+
+        eval_result = self.evaluate_bid(bid, est, a, TableType.TABLE_3)
+        ps_result = calc_price_score(bid, est, a, TableType.TABLE_3)
+
+        self.assertAlmostEqual(eval_result.score, float(ps_result.score), places=4)
+        self.assertAlmostEqual(eval_result.ratio, float(ps_result.ratio), places=4)
+
+    def test_evaluate_bid_a_ge_est(self):
+        """A >= est → score=2, ratio=0."""
+        eval_result = self.evaluate_bid(
+            100_000_000, 50_000_000, 60_000_000, TableType.TABLE_3,
+        )
+        self.assertEqual(eval_result.score, 2.0)
+        self.assertEqual(eval_result.ratio, 0.0)
+        self.assertFalse(eval_result.is_fixed)
+
+    def test_evaluate_bid_out_of_scope(self):
+        """OUT_OF_SCOPE → score=2."""
+        eval_result = self.evaluate_bid(
+            100_000_000, 500_000_000, 0, TableType.OUT_OF_SCOPE,
+        )
+        self.assertEqual(eval_result.score, 2.0)

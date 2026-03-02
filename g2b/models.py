@@ -237,3 +237,93 @@ class LoadLog(models.Model):
 
     def __str__(self):
         return f"[{self.table_name}] {self.file_name} ({self.status})"
+
+
+class BidApiAValue(models.Model):
+    """API 수집: A값 7개 항목 (입찰공고정보서비스)"""
+
+    bid_ntce_no = models.CharField("입찰공고번호", max_length=40)
+    bid_ntce_ord = models.CharField("입찰공고차수", max_length=10)
+
+    # 7개 A값 필드 (원 단위)
+    national_pension = models.BigIntegerField("국민연금", default=0)
+    health_insurance = models.BigIntegerField("건강보험", default=0)
+    retirement_mutual_aid = models.BigIntegerField("퇴직공제", default=0)
+    long_term_care = models.BigIntegerField("장기요양", default=0)
+    occupational_safety = models.BigIntegerField("산업안전", default=0)
+    safety_management = models.BigIntegerField("안전관리", default=0)
+    quality_management = models.BigIntegerField("품질관리", default=0)
+
+    price_decision_method = models.CharField(
+        "예정가격결정방식", max_length=40, blank=True, default=""
+    )
+    collected_at = models.DateTimeField("수집일시", auto_now_add=True)
+
+    class Meta:
+        unique_together = [("bid_ntce_no", "bid_ntce_ord")]
+        verbose_name = "API A값"
+        verbose_name_plural = "API A값"
+
+    def __str__(self):
+        return f"[{self.bid_ntce_no}-{self.bid_ntce_ord}] A값"
+
+
+class BidApiPrelimPrice(models.Model):
+    """API 수집: 복수예비가격 (공고당 최대 15개)"""
+
+    bid_ntce_no = models.CharField("입찰공고번호", max_length=40)
+    bid_ntce_ord = models.CharField("입찰공고차수", max_length=10)
+    sequence_no = models.IntegerField("순번")
+
+    basis_planned_price = models.BigIntegerField("개별예비가격", default=0)
+    is_drawn = models.BooleanField("추첨여부", default=False)
+    draw_count = models.IntegerField("선택횟수", default=0)
+    planned_price = models.BigIntegerField("예정가격", default=0)
+    base_amount = models.BigIntegerField("기초금액", default=0)
+    collected_at = models.DateTimeField("수집일시", auto_now_add=True)
+
+    class Meta:
+        unique_together = [("bid_ntce_no", "bid_ntce_ord", "sequence_no")]
+        verbose_name = "API 복수예비가격"
+        verbose_name_plural = "API 복수예비가격"
+
+    def __str__(self):
+        return f"[{self.bid_ntce_no}-{self.bid_ntce_ord}] #{self.sequence_no}"
+
+
+class BidApiCollectionLog(models.Model):
+    """API 수집 상태 추적 (공고별, 재시작 가능)"""
+
+    STATUS_CHOICES = [
+        ("pending", "대기"),
+        ("ok", "성공"),
+        ("empty", "비대상"),
+        ("error", "오류"),
+    ]
+
+    bid_ntce_no = models.CharField("입찰공고번호", max_length=40)
+    bid_ntce_ord = models.CharField("입찰공고차수", max_length=10)
+    a_value_status = models.CharField(
+        "A값 상태", max_length=20, choices=STATUS_CHOICES, default="pending"
+    )
+    prelim_status = models.CharField(
+        "복수예비가격 상태", max_length=20, choices=STATUS_CHOICES, default="pending"
+    )
+    error_detail = models.TextField("오류 상세", blank=True, default="")
+    created_at = models.DateTimeField("생성일시", auto_now_add=True)
+    updated_at = models.DateTimeField("수정일시", auto_now=True)
+
+    class Meta:
+        unique_together = [("bid_ntce_no", "bid_ntce_ord")]
+        verbose_name = "API 수집 로그"
+        verbose_name_plural = "API 수집 로그"
+        indexes = [
+            models.Index(fields=["a_value_status"]),
+            models.Index(fields=["prelim_status"]),
+        ]
+
+    def __str__(self):
+        return (
+            f"[{self.bid_ntce_no}-{self.bid_ntce_ord}] "
+            f"A={self.a_value_status} P={self.prelim_status}"
+        )
