@@ -1299,6 +1299,12 @@ class Command(BaseCommand):
             ratio_high = min(win_median + margin, 94.0)
             center = win_median
 
+            # 밴드 뒤집힘 보정: center < floor_rate인 경우
+            # (T2A 저경쟁 등 투찰비율이 하한율보다 낮은 세그먼트)
+            if ratio_low > ratio_high:
+                ratio_low = max(win_median - margin, 70.0)
+                ratio_high = max(win_median + margin, ratio_low + 0.5)
+
             # M3 피크 회피
             avoided_peaks = []
             for pb in peak_bins:
@@ -1410,7 +1416,7 @@ class Command(BaseCommand):
             # 좁은 밴드 감지
             for p in seg_cells:
                 band = p["ratio_high"] - p["ratio_low"]
-                if band < 0.5:
+                if 0 < band < 0.5:
                     rule_id += 1
                     rules.append({
                         "id": rule_id,
