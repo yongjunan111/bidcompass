@@ -1,0 +1,151 @@
+{% extends "g2b/base.html" %}
+{% block title %}가격점수 계산기 - 입찰나침반{% endblock %}
+
+{% block content %}
+<h1>가격점수 계산기</h1>
+<p>추정가격과 투찰금액을 입력하면 가격점수와 히트맵을 확인할 수 있습니다.</p>
+
+{% if error %}
+<div class="msg-error">{{ error }}</div>
+{% endif %}
+
+<form method="post">
+  {% csrf_token %}
+  <div class="form-section">
+    <h2>기본 정보</h2>
+    <div class="form-row">
+      <label for="estimated_price">추정가격 (원) *</label>
+      <input type="text" name="estimated_price" id="estimated_price"
+             value="{{ form.estimated_price|default:'' }}" placeholder="예: 150000000" required>
+    </div>
+    <div class="form-row">
+      <label>공사구분 *</label>
+      <div class="radio-group">
+        <label><input type="radio" name="work_type" value="construction"
+          {% if not form.work_type or form.work_type == 'construction' %}checked{% endif %}> 일반공사</label>
+        <label><input type="radio" name="work_type" value="specialty"
+          {% if form.work_type == 'specialty' %}checked{% endif %}> 전문공사</label>
+      </div>
+    </div>
+    <div class="form-row">
+      <label for="bid_price">투찰금액 (원)</label>
+      <input type="text" name="bid_price" id="bid_price"
+             value="{{ form.bid_price|default:'' }}" placeholder="미입력 시 히트맵만 표시">
+    </div>
+    <div class="form-row">
+      <label for="net_construction_cost">순공사원가 (원)</label>
+      <input type="text" name="net_construction_cost" id="net_construction_cost"
+             value="{{ form.net_construction_cost|default:'' }}" placeholder="98% 배제 판정용">
+    </div>
+  </div>
+
+  <div class="form-section">
+    <h2>A값 7항목 (미입력 시 0)</h2>
+    <div class="form-row">
+      <label for="national_pension">국민연금보험료</label>
+      <input type="text" name="national_pension" id="national_pension"
+             value="{{ form.national_pension|default:'0' }}">
+    </div>
+    <div class="form-row">
+      <label for="health_insurance">국민건강보험료</label>
+      <input type="text" name="health_insurance" id="health_insurance"
+             value="{{ form.health_insurance|default:'0' }}">
+    </div>
+    <div class="form-row">
+      <label for="retirement_mutual_aid">퇴직공제부금비</label>
+      <input type="text" name="retirement_mutual_aid" id="retirement_mutual_aid"
+             value="{{ form.retirement_mutual_aid|default:'0' }}">
+    </div>
+    <div class="form-row">
+      <label for="long_term_care">노인장기요양보험료</label>
+      <input type="text" name="long_term_care" id="long_term_care"
+             value="{{ form.long_term_care|default:'0' }}">
+    </div>
+    <div class="form-row">
+      <label for="occupational_safety">산업안전보건관리비</label>
+      <input type="text" name="occupational_safety" id="occupational_safety"
+             value="{{ form.occupational_safety|default:'0' }}">
+    </div>
+    <div class="form-row">
+      <label for="safety_management">안전관리비</label>
+      <input type="text" name="safety_management" id="safety_management"
+             value="{{ form.safety_management|default:'0' }}">
+    </div>
+    <div class="form-row">
+      <label for="quality_management">품질관리비</label>
+      <input type="text" name="quality_management" id="quality_management"
+             value="{{ form.quality_management|default:'0' }}">
+    </div>
+  </div>
+
+  <button type="submit" class="btn">계산하기</button>
+</form>
+
+{% if result %}
+<div class="result-box" style="margin-top:1.5rem">
+  <h2>분석 결과</h2>
+  <div class="result-grid">
+    <div class="result-item">
+      <div class="label">별표 유형</div>
+      <div class="value">{{ table_label }}</div>
+    </div>
+    <div class="result-item">
+      <div class="label">A값 합산</div>
+      <div class="value">{{ result.a_value|stringformat:"," }}원</div>
+    </div>
+    <div class="result-item">
+      <div class="label">낙찰하한율</div>
+      <div class="value">{{ floor_rate }}%</div>
+    </div>
+    {% if result.price_score_result %}
+    <div class="result-item">
+      <div class="label">가격점수</div>
+      <div class="value">{{ result.price_score_result.score }}점</div>
+    </div>
+    <div class="result-item">
+      <div class="label">투찰비율</div>
+      <div class="value">{{ result.price_score_result.ratio }}</div>
+    </div>
+    {% endif %}
+    {% if result.exclusion_result %}
+    <div class="result-item">
+      <div class="label">배제 판정</div>
+      <div class="value">{{ result.exclusion_result.message }}</div>
+    </div>
+    {% endif %}
+  </div>
+
+  {% for msg in result.messages %}
+  <div class="msg-warn" style="margin-top:0.75rem">{{ msg }}</div>
+  {% endfor %}
+</div>
+
+{% if heatmap_rows %}
+<div class="result-box">
+  <h2>점수 히트맵 (투찰율별 가격점수)</h2>
+  <div style="max-height:400px; overflow-y:auto">
+  <table>
+    <thead>
+      <tr>
+        <th>투찰율 (%)</th>
+        <th>투찰금액 (원)</th>
+        <th>가격점수</th>
+        <th>비고</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in heatmap_rows %}
+      <tr {% if row.is_fixed %}class="highlight-max"{% endif %}>
+        <td>{{ row.rate_pct }}</td>
+        <td>{{ row.bid_amount }}</td>
+        <td>{{ row.score }}</td>
+        <td>{% if row.is_fixed %}고정점수{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+{% endif %}
+{% endif %}
+{% endblock %}

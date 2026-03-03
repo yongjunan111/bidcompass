@@ -1,0 +1,91 @@
+{% extends "g2b/base.html" %}
+{% block title %}인포21C 벤치마크 - 입찰나침반{% endblock %}
+
+{% block content %}
+<h1>인포21C 벤치마크</h1>
+<p>인포21C 추천 투찰율 vs BidCompass 최적 추천 비교</p>
+
+{% if error_message %}
+<div class="msg-info">{{ error_message }}</div>
+{% endif %}
+
+{% if summary %}
+<div class="result-box">
+  <h2>요약</h2>
+  <div class="summary-row">
+    <div class="stat-box win">
+      <div class="stat-value">{{ summary.bc_wins }}</div>
+      <div class="stat-label">BidCompass 우위</div>
+    </div>
+    <div class="stat-box">
+      <div class="stat-value">{{ summary.draws }}</div>
+      <div class="stat-label">동점</div>
+    </div>
+    <div class="stat-box lose">
+      <div class="stat-value">{{ summary.info_wins }}</div>
+      <div class="stat-label">인포21C 우위</div>
+    </div>
+  </div>
+  <div class="result-grid">
+    <div class="result-item">
+      <div class="label">평균 점수 개선</div>
+      <div class="value">+{{ summary.avg_improvement }}점</div>
+    </div>
+    <div class="result-item">
+      <div class="label">분석 건수</div>
+      <div class="value">{{ meta.total }}건</div>
+    </div>
+    <div class="result-item">
+      <div class="label">최적분석</div>
+      <div class="value">{{ meta.optimal_count }}건</div>
+    </div>
+    <div class="result-item">
+      <div class="label">단일예정가격 분석</div>
+      <div class="value">{{ meta.single_est_count }}건</div>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+{% if records %}
+<div class="result-box">
+  <h2>건별 비교표</h2>
+  <div style="overflow-x:auto">
+  <table>
+    <thead>
+      <tr>
+        <th>공고번호</th>
+        <th>공사명</th>
+        <th>데이터</th>
+        <th>인포 점수</th>
+        <th>BC 점수</th>
+        <th>1순위 점수</th>
+        <th>차이</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in records %}
+      <tr>
+        <td style="text-align:left; font-size:0.75rem">{{ r.bid_ntce_no }}</td>
+        <td style="text-align:left; font-size:0.75rem; max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap">{{ r.bid_name }}</td>
+        <td>{{ r.data_source }}</td>
+        <td {% if r.info_score < r.bc_score %}class="highlight-info"{% endif %}>
+          {{ r.info_score }}
+        </td>
+        <td {% if r.bc_score > r.info_score %}class="highlight-bc"{% elif r.bc_score == r.info_score %}{% else %}class="highlight-info"{% endif %}>
+          {{ r.bc_score }}
+        </td>
+        <td>{{ r.rank1_score }}</td>
+        <td {% if r.bc_score > r.info_score %}class="highlight-bc"{% endif %}>
+          {% widthratio r.bc_score 1 1 as bc_int %}
+          {% widthratio r.info_score 1 1 as info_int %}
+          {{ r.improvement }}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+{% endif %}
+{% endblock %}

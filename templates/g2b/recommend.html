@@ -1,0 +1,119 @@
+{% extends "g2b/base.html" %}
+{% block title %}최적투찰 추천기 - 입찰나침반{% endblock %}
+
+{% block content %}
+<h1>최적투찰 추천기</h1>
+<p>복수예비가격을 입력하면 기대점수를 최대화하는 투찰 구간을 추천합니다.</p>
+
+{% if error %}
+<div class="msg-error">{{ error }}</div>
+{% endif %}
+
+<form method="post">
+  {% csrf_token %}
+  <div class="form-section">
+    <h2>기본 정보</h2>
+    <div class="form-row">
+      <label for="estimated_price">추정가격 (원) *</label>
+      <input type="text" name="estimated_price" id="estimated_price"
+             value="{{ form.estimated_price|default:'' }}" placeholder="예: 150000000" required>
+    </div>
+    <div class="form-row">
+      <label>공사구분 *</label>
+      <div class="radio-group">
+        <label><input type="radio" name="work_type" value="construction"
+          {% if not form.work_type or form.work_type == 'construction' %}checked{% endif %}> 일반공사</label>
+        <label><input type="radio" name="work_type" value="specialty"
+          {% if form.work_type == 'specialty' %}checked{% endif %}> 전문공사</label>
+      </div>
+    </div>
+    <div class="form-row">
+      <label for="a_value">A값 합산 (원)</label>
+      <input type="text" name="a_value" id="a_value"
+             value="{{ form.a_value|default:'0' }}" placeholder="7항목 합산, 미입력 시 0">
+    </div>
+    <div class="form-row">
+      <label for="net_construction_cost">순공사원가 (원)</label>
+      <input type="text" name="net_construction_cost" id="net_construction_cost"
+             value="{{ form.net_construction_cost|default:'' }}" placeholder="98% 하한 제약">
+    </div>
+  </div>
+
+  <div class="form-section">
+    <h2>복수예비가격 (최소 4개, 최대 15개)</h2>
+    {% for pv in prelim_values %}
+    <div class="form-row">
+      <label for="prelim_{{ forloop.counter0 }}">예비가격 {{ forloop.counter }}{% if forloop.counter <= 4 %} *{% endif %}</label>
+      <input type="text" name="prelim_{{ forloop.counter0 }}" id="prelim_{{ forloop.counter0 }}"
+             value="{{ pv }}" placeholder="{% if forloop.counter <= 4 %}필수{% else %}선택{% endif %}">
+    </div>
+    {% endfor %}
+  </div>
+
+  <button type="submit" class="btn">추천받기</button>
+</form>
+
+{% if result %}
+<div class="result-box" style="margin-top:1.5rem">
+  <h2>추천 결과 ({{ table_label }})</h2>
+
+  <div class="band-display">
+    <div class="band-label">추천 투찰 구간</div>
+    <div class="band-value">{{ band_low_fmt }}원 ~ {{ band_high_fmt }}원</div>
+    <div class="band-label">최적 투찰금액: {{ optimal_bid_fmt }}원</div>
+  </div>
+
+  <div class="result-grid">
+    <div class="result-item">
+      <div class="label">기대점수</div>
+      <div class="value">{{ expected_score }}점</div>
+    </div>
+    <div class="result-item">
+      <div class="label">최선 시나리오</div>
+      <div class="value">{{ max_score }}점</div>
+    </div>
+    <div class="result-item">
+      <div class="label">최악 시나리오</div>
+      <div class="value">{{ min_score }}점</div>
+    </div>
+    <div class="result-item">
+      <div class="label">시나리오 수</div>
+      <div class="value">{{ n_scenarios }}개</div>
+    </div>
+  </div>
+
+  <div class="disclaimer">
+    이 추천은 참고 정보이며, 최종 투찰 결정은 사용자의 책임입니다.
+    추천 구간 내 금액은 실질적으로 동등한 기대점수를 가집니다.
+  </div>
+</div>
+
+{% if scenario_rows %}
+<div class="result-box">
+  <h2>시나리오별 점수 분포 (고유 예정가격 {{ n_unique_scenarios }}개)</h2>
+  <div style="max-height:400px; overflow-y:auto">
+  <table>
+    <thead>
+      <tr>
+        <th>예정가격 (원)</th>
+        <th>가격점수</th>
+        <th>시나리오 수</th>
+        <th>확률 (%)</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in scenario_rows %}
+      <tr>
+        <td>{{ row.est_price }}</td>
+        <td>{{ row.score }}</td>
+        <td>{{ row.count }}</td>
+        <td>{{ row.prob }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+{% endif %}
+{% endif %}
+{% endblock %}

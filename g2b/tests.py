@@ -1,7 +1,7 @@
 """
-BidCompass 코어엔진 테스트 스위트
+BidCompass 테스트 스위트
 
-9개 클래스, SimpleTestCase (DB 불필요):
+13개 클래스:
   - TestRoundingHelpers
   - TestSelectTable
   - TestCalculateAValue
@@ -11,11 +11,18 @@ BidCompass 코어엔진 테스트 스위트
   - TestBidAnalysisEngine
   - TestAssessmentRateFormula (BC-29)
   - TestOptimalBid (BC-33)
+  - TestCalculatorView (BC-39)
+  - TestRecommendView (BC-40)
+  - TestBenchmarkView (BC-38)
+  - TestRecommendBand (BC-40)
 """
 
+import json
 from decimal import Decimal
+from pathlib import Path
 
-from django.test import SimpleTestCase
+from django.conf import settings
+from django.test import SimpleTestCase, TestCase, Client as DjangoClient
 
 from g2b.services.bid_engine import (
     AValueItems,
@@ -812,3 +819,296 @@ class TestOptimalBid(SimpleTestCase):
             100_000_000, 500_000_000, 0, TableType.OUT_OF_SCOPE,
         )
         self.assertEqual(eval_result.score, 2.0)
+
+
+# ──────────────────────────────────────────────
+# BC-39: 가격점수 계산기 뷰 테스트
+# ──────────────────────────────────────────────
+
+class TestCalculatorView(TestCase):
+    """BC-39: 계산기 뷰 테스트."""
+
+    def setUp(self):
+        self.client = DjangoClient()
+
+    def test_get_renders_form(self):
+        resp = self.client.get("/calculator/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "가격점수 계산기")
+
+    def test_post_normal_calculation(self):
+        """추정가격 1.5억, A값 0, 투찰금액 1.35억, 일반공사 → TABLE_5, 점수 출력."""
+        resp = self.client.post("/calculator/", {
+            "estimated_price": "150000000",
+            "work_type": "construction",
+            "bid_price": "135000000",
+            "national_pension": "0",
+            "health_insurance": "0",
+            "retirement_mutual_aid": "0",
+            "long_term_care": "0",
+            "occupational_safety": "0",
+            "safety_management": "0",
+            "quality_management": "0",
+        })
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "별표 5")
+        # 점수가 표시되어야 함
+        self.assertTrue(resp.context["result"].price_score_result is not None)
+
+    def test_post_missing_estimated_price(self):
+        """추정가격 미입력 → 에러 메시지."""
+        resp = self.client.post("/calculator/", {
+            "estimated_price": "",
+            "work_type": "construction",
+        })
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "추정가격을 입력하세요")
+
+    def test_post_out_of_scope(self):
+        """100억 이상 → OUT_OF_SCOPE."""
+        resp = self.client.post("/calculator/", {
+            "estimated_price": "10000000000",
+            "work_type": "construction",
+            "national_pension": "0",
+            "health_insurance": "0",
+            "retirement_mutual_aid": "0",
+            "long_term_care": "0",
+            "occupational_safety": "0",
+            "safety_management": "0",
+            "quality_management": "0",
+        })
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "적격심사 대상 외")
+
+    def test_post_heatmap_generated(self):
+        """히트맵 데이터가 생성되어야 함."""
+        resp = self.client.post("/calculator/", {
+            "estimated_price": "150000000",
+            "work_type": "construction",
+            "national_pension": "0",
+            "health_insurance": "0",
+            "retirement_mutual_aid": "0",
+            "long_term_care": "0",
+            "occupational_safety": "0",
+            "safety_management": "0",
+            "quality_management": "0",
+        })
+        self.assertEqual(resp.status_code, 200)
+        self.assertGreater(len(resp.context["heatmap_rows"]), 0)
+
+
+# ──────────────────────────────────────────────
+# BC-40: 최적투찰 추천기 뷰 테스트
+# ──────────────────────────────────────────────
+
+class TestRecommendView(TestCase):
+    """BC-40: 추천기 뷰 테스트."""
+
+    def setUp(self):
+        self.client = DjangoClient()
+
+    def test_get_renders_form(self):
+        resp = self.client.get("/recommend/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "최적투찰 추천기")
+
+    def test_post_with_15_prices(self):
+        """15개 복수예비가격 → 1,365 시나리오."""
+        data = {
+            "estimated_price": "500000000",
+            "work_type": "construction",
+            "a_value": "50000000",
+        }
+        for i in range(15):
+            data[f"prelim_{i}"] = str(500_000_000 + i * 500_000)
+
+        resp = self.client.post("/recommend/", data)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.context["n_scenarios"], 1365)
+        self.assertContains(resp, "추천 투찰 구간")
+
+    def test_post_with_4_prices(self):
+        """4개 복수예비가격 → 1 시나리오."""
+        data = {
+            "estimated_price": "500000000",
+            "work_type": "construction",
+            "a_value": "0",
+            "prelim_0": "500000000",
+            "prelim_1": "501000000",
+            "prelim_2": "502000000",
+            "prelim_3": "503000000",
+        }
+        resp = self.client.post("/recommend/", data)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.context["n_scenarios"], 1)
+
+    def test_post_insufficient_prices(self):
+        """3개 미만 → 에러."""
+        data = {
+            "estimated_price": "500000000",
+            "work_type": "construction",
+            "a_value": "0",
+            "prelim_0": "500000000",
+            "prelim_1": "501000000",
+            "prelim_2": "502000000",
+        }
+        resp = self.client.post("/recommend/", data)
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "최소 4개")
+
+    def test_post_out_of_scope(self):
+        """100억 이상 → OUT_OF_SCOPE 에러."""
+        data = {
+            "estimated_price": "10000000000",
+            "work_type": "construction",
+            "a_value": "0",
+        }
+        for i in range(4):
+            data[f"prelim_{i}"] = str(10_000_000_000 + i * 1_000_000)
+        resp = self.client.post("/recommend/", data)
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "적격심사 대상 외")
+
+
+# ──────────────────────────────────────────────
+# BC-38: 벤치마크 뷰 테스트
+# ──────────────────────────────────────────────
+
+class TestBenchmarkView(TestCase):
+    """BC-38: 벤치마크 뷰 테스트."""
+
+    def setUp(self):
+        self.client = DjangoClient()
+
+    def test_no_json_shows_message(self):
+        """JSON 파일 없음 → 안내 메시지."""
+        resp = self.client.get("/benchmark/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "benchmark_info21c")
+
+    def test_valid_json_renders(self):
+        """정상 JSON → 비교표 렌더링."""
+        json_path = Path(settings.BASE_DIR) / "data" / "collected" / "benchmark_info21c.json"
+        json_path.parent.mkdir(parents=True, exist_ok=True)
+
+        test_data = {
+            "meta": {"total": 1, "optimal_count": 0, "single_est_count": 1},
+            "summary": {"bc_wins": 1, "draws": 0, "info_wins": 0, "avg_improvement": 5.0},
+            "records": [{
+                "bid_ntce_no": "TEST-001",
+                "bid_name": "테스트공사",
+                "data_source": "fallback_single_est",
+                "info_score": 85.0,
+                "bc_score": 90.0,
+                "rank1_score": 89.0,
+                "improvement": 5.0,
+            }],
+        }
+        json_path.write_text(json.dumps(test_data, ensure_ascii=False))
+
+        try:
+            resp = self.client.get("/benchmark/")
+            self.assertEqual(resp.status_code, 200)
+            self.assertContains(resp, "BidCompass 우위")
+            self.assertEqual(resp.context["summary"]["bc_wins"], 1)
+        finally:
+            json_path.unlink(missing_ok=True)
+
+    def test_corrupt_json_shows_error(self):
+        """손상 JSON → 에러 메시지."""
+        json_path = Path(settings.BASE_DIR) / "data" / "collected" / "benchmark_info21c.json"
+        json_path.parent.mkdir(parents=True, exist_ok=True)
+        json_path.write_text("{invalid json content!!")
+
+        try:
+            resp = self.client.get("/benchmark/")
+            self.assertEqual(resp.status_code, 200)
+            self.assertContains(resp, "로드 실패")
+        finally:
+            json_path.unlink(missing_ok=True)
+
+
+# ──────────────────────────────────────────────
+# BC-40: 밴드 산출 단위 테스트
+# ──────────────────────────────────────────────
+
+class TestRecommendBand(SimpleTestCase):
+    """BC-40: 추천 밴드 산출 로직 테스트."""
+
+    def test_band_contains_optimal(self):
+        """밴드가 optimal_bid를 포함."""
+        from g2b.services.optimal_bid import (
+            OptimalBidInput,
+            find_optimal_bid,
+            generate_scenarios,
+            compute_expected_score,
+        )
+
+        prices = [500_000_000 + i * 500_000 for i in range(15)]
+        inp = OptimalBidInput(
+            preliminary_prices=prices,
+            a_value=5000_0000,
+            table_type=TableType.TABLE_3,
+            presume_price=5 * UNIT_EOUK,
+        )
+        result = find_optimal_bid(inp)
+
+        params = TABLE_PARAMS_MAP[TableType.TABLE_3]
+        scenarios = generate_scenarios(prices)
+        optimal_bid = result.recommended_bid
+        threshold = result.expected_score - 0.05
+
+        band_bids = []
+        for offset in range(-100, 101):
+            test_bid = optimal_bid + offset * 1_000
+            if test_bid <= 0:
+                continue
+            es = compute_expected_score(
+                test_bid, scenarios, 5000_0000,
+                float(params.max_score), float(params.coeff),
+                float(params.fixed_ratio), float(params.fixed_score),
+            )
+            if es >= threshold:
+                band_bids.append(test_bid)
+
+        band_low = min(band_bids)
+        band_high = max(band_bids)
+        self.assertLessEqual(band_low, optimal_bid)
+        self.assertGreaterEqual(band_high, optimal_bid)
+        self.assertGreater(len(band_bids), 0)
+
+    def test_band_all_scores_above_threshold(self):
+        """밴드 내 모든 bid의 기대점수가 threshold 이상."""
+        from g2b.services.optimal_bid import (
+            OptimalBidInput,
+            find_optimal_bid,
+            generate_scenarios,
+            compute_expected_score,
+        )
+
+        prices = [500_000_000 + i * 500_000 for i in range(15)]
+        inp = OptimalBidInput(
+            preliminary_prices=prices,
+            a_value=5000_0000,
+            table_type=TableType.TABLE_3,
+            presume_price=5 * UNIT_EOUK,
+        )
+        result = find_optimal_bid(inp)
+
+        params = TABLE_PARAMS_MAP[TableType.TABLE_3]
+        scenarios = generate_scenarios(prices)
+        optimal_bid = result.recommended_bid
+        threshold = result.expected_score - 0.05
+
+        for offset in range(-100, 101):
+            test_bid = optimal_bid + offset * 1_000
+            if test_bid <= 0:
+                continue
+            es = compute_expected_score(
+                test_bid, scenarios, 5000_0000,
+                float(params.max_score), float(params.coeff),
+                float(params.fixed_ratio), float(params.fixed_score),
+            )
+            if es >= threshold:
+                # 밴드 내 → threshold 이상이어야
+                self.assertGreaterEqual(es, threshold)

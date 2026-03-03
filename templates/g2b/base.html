@@ -1,0 +1,26 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}입찰나침반{% endblock %}</title>
+  <link rel="stylesheet" href="{% static 'g2b/style.css' %}">
+</head>
+<body>
+  <nav class="navbar">
+    <a href="{% url 'g2b:index' %}" class="nav-brand">입찰나침반</a>
+    <div class="nav-links">
+      <a href="{% url 'g2b:calculator' %}">가격점수 계산기</a>
+      <a href="{% url 'g2b:recommend' %}">최적투찰 추천기</a>
+      <a href="{% url 'g2b:benchmark' %}">벤치마크</a>
+    </div>
+  </nav>
+  <main class="container">
+    {% block content %}{% endblock %}
+  </main>
+  <footer class="footer">
+    <p>BidCompass &copy; 2026 &mdash; 참고 정보이며, 최종 결정은 사용자 책임입니다.</p>
+  </footer>
+</body>
+</html>
