@@ -3,6 +3,10 @@
 BidResult에서 적격심사 건설 <100억 공고를 추출하고,
 입찰공고정보서비스(A값) + 낙찰정보서비스(복수예비가격) API로 수집하여 DB에 저장한다.
 
+아키텍처: API → JSON 원본 저장 → DB 적재 (2단계)
+  - JSON 원본: data/collected/api_raw/{a_values,prelim_prices}/{ntce_no}_{ntce_ord}.json
+  - DB 손실 시 JSON에서 재적재 가능 (load_api_json 커맨드)
+
 BC-36 안전장치:
   - PID lockfile: 중복 실행 방지 (O_CREAT|O_EXCL 원자적 생성)
   - RateLimitError: 429 / API 한도 초과 즉시 중단
@@ -18,9 +22,11 @@ BC-36 안전장치:
 """
 
 import atexit
+import json
 import os
 import sys
 import time
+from pathlib import Path
 
 import httpx
 from django.core.management.base import BaseCommand
@@ -43,6 +49,11 @@ MAX_PRESUME_PRICE = 10_000_000_000
 # BC-36: 안전장치 상수
 LOCK_FILE = "/tmp/collect_bid_api_data.lock"
 MAX_CONSECUTIVE_ERRORS = 5
+
+# JSON 원본 저장 경로
+RAW_DIR = Path(__file__).resolve().parents[3] / "data" / "collected" / "api_raw"
+RAW_A_VALUE_DIR = RAW_DIR / "a_values"
+RAW_PRELIM_DIR = RAW_DIR / "prelim_prices"
 
 # A값 API 필드 → 모델 필드 매핑
 A_VALUE_API_TO_MODEL = {
@@ -439,6 +450,12 @@ class Command(BaseCommand):
 
         return stats
 
+    def _save_raw_json(self, directory: Path, ntce_no: str, ntce_ord: str, data: dict):
+        """API 응답 JSON 원본을 파일로 저장."""
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"{ntce_no}_{ntce_ord}.json"
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
     def _collect_a_value(
         self,
         client: httpx.Client,
@@ -447,7 +464,7 @@ class Command(BaseCommand):
         ntce_ord: str,
         log: BidApiCollectionLog,
     ) -> str:
-        """A값 API 수집. 결과를 DB에 저장하고 상태 문자열 반환."""
+        """A값 API 수집. JSON 원본 저장 → DB 적재."""
         params = {
             "ServiceKey": api_key,
             "type": "json",
@@ -473,14 +490,15 @@ class Command(BaseCommand):
             log.save(update_fields=["a_value_status", "updated_at"])
             return "empty"
 
-        # 첫 번째 아이템에서 A값 추출
+        # JSON 원본 저장
+        actual_ord = ntce_ord or items[0].get("bidNtceOrd", "") or "000"
+        self._save_raw_json(RAW_A_VALUE_DIR, ntce_no, actual_ord, data)
+
+        # 첫 번째 아이템에서 A값 추출 → DB 적재
         item = items[0]
         model_fields = {}
         for api_field, model_field in A_VALUE_API_TO_MODEL.items():
             model_fields[model_field] = parse_api_int(item.get(api_field))
-
-        # ntce_ord가 빈값이면 API 응답에서 가져오기
-        actual_ord = ntce_ord or item.get("bidNtceOrd", "") or "000"
 
         BidApiAValue.objects.update_or_create(
             bid_ntce_no=ntce_no,
@@ -530,6 +548,7 @@ class Command(BaseCommand):
                 items = extract_items(data)
                 if items:
                     actual_ord = ord_try or ntce_ord or "000"
+                    self._save_raw_json(RAW_PRELIM_DIR, ntce_no, actual_ord, data)
                     self._save_prelim_prices(ntce_no, actual_ord, items)
 
                     if not ntce_ord and actual_ord != ntce_ord:
