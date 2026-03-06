@@ -239,6 +239,11 @@ def recommend(request):
             TableType.TABLE_5: '별표 5',
         }
 
+        # 하한율 정보 (BC-46)
+        floor_rate = get_floor_rate(estimated_price)
+        floor_rate_bid = result.floor_rate_bid
+        floor_rate_pass = result.recommended_bid >= floor_rate_bid
+
         context['result'] = result
         context['table_label'] = table_label.get(table_type, '')
         context['band_low'] = band_low
@@ -252,6 +257,10 @@ def recommend(request):
         context['n_scenarios'] = result.n_scenarios
         context['n_unique_scenarios'] = len(unique_scenarios)
         context['scenario_rows'] = scenario_rows
+        context['floor_rate'] = str(floor_rate)
+        context['floor_rate_bid'] = floor_rate_bid
+        context['floor_rate_bid_fmt'] = f"{floor_rate_bid:,}"
+        context['floor_rate_pass'] = floor_rate_pass
         context['form'] = request.POST
 
     return render(request, 'g2b/recommend.html', context)

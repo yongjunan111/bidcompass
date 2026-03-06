@@ -21,6 +21,7 @@ from g2b.services.bid_engine import (
     TableType,
     calc_price_score,
     ceil_up,
+    get_floor_rate,
 )
 from decimal import Decimal
 
@@ -47,6 +48,7 @@ class OptimalBidResult:
     max_scenario_score: float               # 최선 시나리오 점수
     scan_steps: int                         # 스캔한 투찰금액 수
     floor_bid: Optional[int]                # 하한 제약 (적용된 경우)
+    floor_rate_bid: Optional[int] = None    # 하한율 최소 투찰가 (전 시나리오 통과)
 
 
 @dataclass
@@ -260,6 +262,11 @@ def find_optimal_bid(inp: OptimalBidInput) -> OptimalBidResult:
         for est in scenarios
     ]
 
+    # 하한율 최소 투찰가 (전 시나리오 통과)
+    floor_rate = get_floor_rate(inp.presume_price)
+    max_scenario_est = max(scenarios)
+    floor_rate_bid = math.ceil(a + float(floor_rate) / 100 * (max_scenario_est - a))
+
     return OptimalBidResult(
         recommended_bid=recommended_bid,
         expected_score=final_expected,
@@ -268,6 +275,7 @@ def find_optimal_bid(inp: OptimalBidInput) -> OptimalBidResult:
         max_scenario_score=max(scores),
         scan_steps=total_steps,
         floor_bid=floor_bid,
+        floor_rate_bid=floor_rate_bid,
     )
 
 

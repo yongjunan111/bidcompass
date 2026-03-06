@@ -63,6 +63,26 @@
     <div class="band-label">최적 투찰금액: {{ optimal_bid_fmt }}원</div>
   </div>
 
+  <div class="floor-info" style="margin-top:1rem; padding:1rem; background:#fff8e1; border-left:4px solid #ff9800; border-radius:4px">
+    <div class="result-grid">
+      <div class="result-item">
+        <div class="label">낙찰하한율</div>
+        <div class="value">{{ floor_rate }}%</div>
+      </div>
+      <div class="result-item">
+        <div class="label">하한 최소 투찰가</div>
+        <div class="value">{{ floor_rate_bid_fmt }}원</div>
+      </div>
+      <div class="result-item">
+        <div class="label">하한율 판정</div>
+        <div class="value">
+          {% if floor_rate_pass %}<span class="badge-pass" style="color:#2e7d32; font-weight:bold">PASS 통과</span>
+          {% else %}<span class="badge-fail" style="color:#c62828; font-weight:bold">FAIL 미달</span>{% endif %}
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div class="result-grid">
     <div class="result-item">
       <div class="label">기대점수</div>
@@ -115,5 +135,38 @@
   </div>
 </div>
 {% endif %}
+
+<div class="result-box" style="margin-top:1.5rem">
+  <h2>내 투찰가 검증</h2>
+  <div class="form-row">
+    <label for="user_bid_check">투찰 예정금액 (원)</label>
+    <input type="text" id="user_bid_check" placeholder="예: 450,000,000">
+    <button type="button" class="btn" onclick="checkFloorRate()">검증</button>
+  </div>
+  <div id="floor-check-result" style="display:none;"></div>
+</div>
+
+<script>
+var FLOOR_RATE_BID = {{ floor_rate_bid }};
+function checkFloorRate() {
+  var raw = document.getElementById('user_bid_check').value.replace(/,/g, '');
+  var bid = parseInt(raw, 10);
+  var el = document.getElementById('floor-check-result');
+  el.style.display = 'block';
+  if (isNaN(bid) || bid <= 0) {
+    el.innerHTML = '<div class="msg-error">유효한 금액을 입력하세요.</div>';
+    return;
+  }
+  if (bid < FLOOR_RATE_BID) {
+    var deficit = FLOOR_RATE_BID - bid;
+    el.innerHTML = '<div class="msg-error"><strong>FAIL</strong> 하한율 미달 탈락<br>부족: ' +
+      deficit.toLocaleString() + '원</div>';
+  } else {
+    var margin = bid - FLOOR_RATE_BID;
+    el.innerHTML = '<div class="msg-info"><strong>PASS</strong> 하한율 통과<br>여유: ' +
+      margin.toLocaleString() + '원</div>';
+  }
+}
+</script>
 {% endif %}
 {% endblock %}

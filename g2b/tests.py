@@ -822,6 +822,74 @@ class TestOptimalBid(SimpleTestCase):
 
 
 # ──────────────────────────────────────────────
+# BC-46: 하한율 미달 방지 테스트
+# ──────────────────────────────────────────────
+
+class TestFloorRateBid(SimpleTestCase):
+    """BC-46: floor_rate_bid 필드 테스트."""
+
+    def _make_result(self, table_type=TableType.TABLE_3, presume_price=5 * UNIT_EOUK,
+                     a_value=5000_0000):
+        from g2b.services.optimal_bid import OptimalBidInput, find_optimal_bid
+        prices = [500_000_000 + i * 500_000 for i in range(15)]
+        inp = OptimalBidInput(
+            preliminary_prices=prices,
+            a_value=a_value,
+            table_type=table_type,
+            presume_price=presume_price,
+        )
+        return find_optimal_bid(inp)
+
+    def test_floor_rate_bid_in_result(self):
+        """floor_rate_bid 필드 존재."""
+        result = self._make_result()
+        self.assertIsNotNone(result.floor_rate_bid)
+        self.assertIsInstance(result.floor_rate_bid, int)
+
+    def test_recommended_above_floor_single_scenario(self):
+        """단일 시나리오에서 추천 bid >= floor_rate_bid (ratio ~90% > floor ~89.7%)."""
+        from g2b.services.optimal_bid import OptimalBidInput, find_optimal_bid
+        prices = [500_000_000] * 4  # 1 시나리오
+        inp = OptimalBidInput(
+            preliminary_prices=prices,
+            a_value=5000_0000,
+            table_type=TableType.TABLE_3,
+            presume_price=5 * UNIT_EOUK,
+        )
+        result = find_optimal_bid(inp)
+        self.assertGreaterEqual(result.recommended_bid, result.floor_rate_bid)
+
+    def test_floor_rate_bid_value(self):
+        """단일 시나리오에서 정확한 값 검증."""
+        from g2b.services.optimal_bid import OptimalBidInput, find_optimal_bid
+        import math
+        est_target = 500_000_000
+        prices = [est_target] * 4  # 1 시나리오, est=500M
+        a = 5000_0000
+        inp = OptimalBidInput(
+            preliminary_prices=prices,
+            a_value=a,
+            table_type=TableType.TABLE_3,
+            presume_price=5 * UNIT_EOUK,
+        )
+        result = find_optimal_bid(inp)
+        # floor_rate for 5억 = 89.745%
+        floor_rate = get_floor_rate(5 * UNIT_EOUK)
+        expected = math.ceil(a + float(floor_rate) / 100 * (est_target - a))
+        self.assertEqual(result.floor_rate_bid, expected)
+
+    def test_floor_rate_bid_different_tables(self):
+        """TABLE별 하한율 차등 적용."""
+        result_t3 = self._make_result(
+            table_type=TableType.TABLE_3, presume_price=5 * UNIT_EOUK)
+        result_t2a = self._make_result(
+            table_type=TableType.TABLE_2A, presume_price=20 * UNIT_EOUK)
+        # 10~50억은 하한율 88.745%, 10억 미만은 89.745%
+        # 하한율이 다르므로 floor_rate_bid도 달라야
+        self.assertNotEqual(result_t3.floor_rate_bid, result_t2a.floor_rate_bid)
+
+
+# ──────────────────────────────────────────────
 # BC-39: 가격점수 계산기 뷰 테스트
 # ──────────────────────────────────────────────
 
@@ -968,6 +1036,34 @@ class TestRecommendView(TestCase):
         resp = self.client.post("/recommend/", data)
         self.assertEqual(resp.status_code, 200)
         self.assertContains(resp, "적격심사 대상 외")
+
+    def test_post_shows_floor_info(self):
+        """BC-46: 하한율 정보 표시 + PASS 포함."""
+        data = {
+            "estimated_price": "500000000",
+            "work_type": "construction",
+            "a_value": "50000000",
+        }
+        for i in range(15):
+            data[f"prelim_{i}"] = str(500_000_000 + i * 500_000)
+        resp = self.client.post("/recommend/", data)
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "낙찰하한율")
+        self.assertContains(resp, "하한 최소 투찰가")
+        self.assertIn("floor_rate_bid", resp.context)
+
+    def test_post_floor_rate_bid_is_int(self):
+        """BC-46: floor_rate_bid 타입 확인."""
+        data = {
+            "estimated_price": "500000000",
+            "work_type": "construction",
+            "a_value": "50000000",
+        }
+        for i in range(15):
+            data[f"prelim_{i}"] = str(500_000_000 + i * 500_000)
+        resp = self.client.post("/recommend/", data)
+        self.assertEqual(resp.status_code, 200)
+        self.assertIsInstance(resp.context["floor_rate_bid"], int)
 
 
 # ──────────────────────────────────────────────
