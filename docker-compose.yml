@@ -1,0 +1,17 @@
+services:
+  db:
+    image: postgres:15
+    container_name: bidcompass_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: bidcompass1234
+      POSTGRES_DB: bidcompass
+    ports:
+      - '5434:5432'
+    volumes:
+      - bidcompass_pgdata:/var/lib/postgresql/data
+
+volumes:
+  bidcompass_pgdata:
+    external: true
