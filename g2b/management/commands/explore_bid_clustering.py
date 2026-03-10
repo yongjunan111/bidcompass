@@ -94,6 +94,10 @@ class Command(BaseCommand):
             "--task", type=str, default="",
             help="특정 태스크만 실행 (0,1,2,3,4 콤마구분)",
         )
+        parser.add_argument(
+            "--collected-only", action="store_true",
+            help="API 수집 완료된 공고만 대상 (BidApiCollectionLog 기준)",
+        )
 
     def handle(self, *args, **options):
         self.area = options["area"]
@@ -101,6 +105,7 @@ class Command(BaseCommand):
         self.max_price = options["max_price"]
         self.min_bidders = options["min_bidders"]
         self.parent_bizno = options["parent_bizno"]
+        self.collected_only = options["collected_only"]
         output_path = (
             options["output"]
             or "data/collected/bid_clustering_exploration.json"
@@ -121,6 +126,8 @@ class Command(BaseCommand):
         self.stdout.write(
             f"  가격상한: {self.max_price}억, 최소참여: {self.min_bidders}명"
         )
+        if self.collected_only:
+            self.stdout.write("  필터: API 수집 완료 공고만 (--collected-only)")
         self.stdout.write(f"  태스크: {tasks}")
         self.stdout.write("")
 
@@ -320,7 +327,17 @@ class Command(BaseCommand):
             cur.execute("DROP TABLE IF EXISTS _cluster_r_filtered")
 
             # Stage 1: BidResult만 필터 (presume_price 인덱스 활용)
-            self.stdout.write("    Stage 1: BidResult 필터링...")
+            collected_filter = ""
+            if self.collected_only:
+                collected_filter = """
+                  AND (bid_ntce_no, bid_ntce_ord) IN (
+                      SELECT bid_ntce_no, bid_ntce_ord
+                      FROM g2b_bidapicollectionlog
+                  )
+                """
+                self.stdout.write("    Stage 1: BidResult 필터링 (수집 공고만)...")
+            else:
+                self.stdout.write("    Stage 1: BidResult 필터링...")
             cur.execute(f"""
                 CREATE TEMP TABLE _cluster_r_filtered AS
                 SELECT bid_ntce_no, bid_ntce_ord,
@@ -331,6 +348,7 @@ class Command(BaseCommand):
                   AND bidder_cnt >= {self.min_bidders}
                   AND presume_price > 0
                   AND presume_price < {max_price_won}
+                  {collected_filter}
             """)
             cur.execute(
                 "CREATE INDEX ON _cluster_r_filtered "
