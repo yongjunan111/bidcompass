@@ -24,3 +24,8 @@ When the user asks for plan review, cross-check, or validation:
 2. Keep verdicts binary where possible: `반영됨` / `미반영`.
 3. If previously raised issues are now fixed, explicitly acknowledge closure.
 4. Avoid introducing new requirements unrelated to the requested diff.
+
+## Tool Boundary
+
+1. Prefer native Codex tools and directly connected MCP servers first.
+2. If an external bridge/client is needed (for example `claude` CLI or another agent runtime), state that explicitly before use and get user approval first.

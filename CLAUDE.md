@@ -1,12 +1,12 @@
 # BidCompass (입찰나침반)
 
-AI-powered bidding analysis for Korea's G2B public procurement system.
+Rule-based bidding analysis engine for Korea's G2B public procurement system.
 
 ## Project Overview
 
-- **Goal**: 중소건설사 대상 AI 입찰 분석 서비스 (나라장터/G2B)
+- **Goal**: 중소건설사 대상 적격심사 규칙 엔진 + 웹 MVP (나라장터/G2B)
 - **Target**: 추정가격 100억 미만 적격심사 전체 (별표 1-5)
-- **Stack**: Django + LangGraph + PostgreSQL
+- **Stack**: Django + PostgreSQL (Phase 1) → + LangGraph (Phase 2)
 - **Phase**: Phase 1 Pilot (카카오톡/스프레드시트, 1~3개 클라이언트)
 - **Key Regulation**: 조달청지침 #9269 (시행 2025.12.1 / 입찰가격평가 2026.1.30)
 
@@ -20,9 +20,9 @@ AI-powered bidding analysis for Korea's G2B public procurement system.
 ## Tech Stack
 
 - Python 3.10
-- Django (backend)
-- LangGraph (AI agent orchestration)
-- PostgreSQL (database)
+- Django 5.0 (backend)
+- PostgreSQL 15 (database)
+- LangGraph (Phase 2 계획)
 - Package manager: pip (pyproject.toml)
 
 ## Key Domain Rules
@@ -37,11 +37,16 @@ AI-powered bidding analysis for Korea's G2B public procurement system.
 
 ```
 bidcompass/
-├── .claude/skills/bid-compass/   # AI skill (도메인 지식)
-├── docs/                          # PDF/엑셀 원본 자료
-├── main.py                        # Entry point
-├── pdf_to_markdown.py             # PDF→MD 변환기
-└── pyproject.toml                 # Project config
+├── config/              # Django settings, urls, wsgi
+├── g2b/                 # Main app (models, views, services, commands)
+│   ├── services/        # bid_engine.py, optimal_bid.py, g2b_client.py
+│   ├── management/commands/  # 21 management commands
+│   └── tests.py         # 110 tests (11 SimpleTestCase + 3 TestCase)
+├── templates/g2b/       # 5 templates
+├── static/g2b/          # style.css
+├── scripts/             # pdf_to_markdown.py, test_api.py, test_new_apis.py
+├── data/collected/      # API raw JSON, charts, analysis outputs (gitignored)
+└── docs/                # Input xlsx files (local only, gitignored)
 ```
 
 ## Conventions

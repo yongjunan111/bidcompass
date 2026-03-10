@@ -5,7 +5,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: bidcompass1234
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
       POSTGRES_DB: bidcompass
     ports:
       - '5434:5432'
@@ -14,4 +14,5 @@ services:
 
 volumes:
   bidcompass_pgdata:
+    # 최초 실행 전: docker volume create bidcompass_pgdata
     external: true

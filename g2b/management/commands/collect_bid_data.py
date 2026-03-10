@@ -1,4 +1,8 @@
-"""나의방 낙찰 엑셀에서 공고번호를 추출하고 A값 + 복수예비가격을 API로 수집한다.
+"""[DEPRECATED] 나의방 낙찰 엑셀에서 공고번호를 추출하고 A값 + 복수예비가격을 API로 수집한다.
+
+.. deprecated::
+    엑셀 기반 수집 파이프라인. DB 기반 수집은 collect_bid_api_data를 사용하세요.
+    이 커맨드는 하위 호환을 위해 유지되며, 향후 삭제될 수 있습니다.
 
 사용:
     python manage.py collect_bid_data              # 전체 수집
@@ -213,7 +217,7 @@ async def collect_all(
 
 
 class Command(BaseCommand):
-    help = "나의방 낙찰 엑셀 공고번호로 A값 + 복수예비가격 API 수집"
+    help = "[DEPRECATED] 나의방 낙찰 엑셀 공고번호로 A값 + 복수예비가격 API 수집 → collect_bid_api_data 사용"
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -226,6 +230,10 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
+        self.stderr.write(self.style.WARNING(
+            "[DEPRECATED] collect_bid_data는 폐기 예정입니다. "
+            "collect_bid_api_data를 사용하세요."
+        ))
         limit = options["limit"]
         skip_a_value = options["skip_a_value"]
 
