@@ -1,0 +1,220 @@
+{% extends "g2b/base.html" %}
+{% block title %}AI 전략 리포트 - 입찰나침반{% endblock %}
+
+{% block content %}
+<h1>AI 전략 리포트</h1>
+<p>사전 추천 결과 + 유사공고 통계를 기반으로 AI가 전략 리포트를 생성합니다.</p>
+
+{% if error %}
+<div class="msg-error">{{ error }}</div>
+{% endif %}
+
+<div class="form-section" style="background:#e3f2fd; padding:1rem; border-radius:8px; margin-bottom:1rem">
+  <h2>공고번호 자동 조회</h2>
+  <div class="form-row" style="display:flex; gap:0.5rem; align-items:end">
+    <div style="flex:1">
+      <label for="bid_ntce_no_lookup">입찰공고번호</label>
+      <input type="text" id="bid_ntce_no_lookup" placeholder="예: 20250101001-00">
+    </div>
+    <button type="button" class="btn" onclick="lookupBid()">조회</button>
+  </div>
+  <div id="lookup-result" style="display:none; margin-top:0.5rem"></div>
+</div>
+
+<script>
+function lookupBid() {
+  var ntceNo = document.getElementById('bid_ntce_no_lookup').value.trim();
+  var el = document.getElementById('lookup-result');
+  if (!ntceNo) { el.style.display='block'; el.innerHTML='<div class="msg-error">공고번호를 입력하세요.</div>'; return; }
+  el.style.display='block'; el.innerHTML='<div class="msg-info">조회 중...</div>';
+  fetch('/lookup/?bid_ntce_no=' + encodeURIComponent(ntceNo))
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.error) { el.innerHTML='<div class="msg-error">' + d.error + '</div>'; return; }
+      document.getElementById('estimated_price').value = d.presume_price;
+      document.getElementById('a_value').value = d.a_value;
+      if (d.base_amount) document.getElementById('base_amount').value = d.base_amount;
+      el.innerHTML='<div class="msg-info">' + d.bid_ntce_nm + ' — 자동 입력 완료</div>';
+    })
+    .catch(function(e) { el.innerHTML='<div class="msg-error">조회 실패: ' + e + '</div>'; });
+}
+</script>
+
+<form method="post">
+  {% csrf_token %}
+  <div class="form-section">
+    <h2>기본 정보</h2>
+    <div class="form-row">
+      <label for="estimated_price">추정가격 (원) *</label>
+      <input type="text" name="estimated_price" id="estimated_price"
+             value="{{ form.estimated_price|default:'' }}" placeholder="예: 500000000" required>
+    </div>
+    <div class="form-row">
+      <label for="base_amount">기초금액 (원)</label>
+      <input type="text" name="base_amount" id="base_amount"
+             value="{{ form.base_amount|default:'' }}" placeholder="미입력 시 추정가격 사용">
+    </div>
+    <div class="form-row">
+      <label>공사구분 *</label>
+      <div class="radio-group">
+        <label><input type="radio" name="work_type" value="construction"
+          {% if not form.work_type or form.work_type == 'construction' %}checked{% endif %}> 일반공사</label>
+        <label><input type="radio" name="work_type" value="specialty"
+          {% if form.work_type == 'specialty' %}checked{% endif %}> 전문공사</label>
+      </div>
+    </div>
+    <div class="form-row">
+      <label for="a_value">A값 합산 (원)</label>
+      <input type="text" name="a_value" id="a_value"
+             value="{{ form.a_value|default:'0' }}" placeholder="7항목 합산, 미입력 시 0">
+    </div>
+    <div class="form-row">
+      <label for="net_construction_cost">순공사원가 (원)</label>
+      <input type="text" name="net_construction_cost" id="net_construction_cost"
+             value="{{ form.net_construction_cost|default:'' }}" placeholder="98% 하한 제약 (선택)">
+    </div>
+  </div>
+
+  <button type="submit" class="btn" id="submit-btn" onclick="showLoading()">리포트 생성</button>
+</form>
+
+<div id="loading-overlay" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.5); z-index:9999; justify-content:center; align-items:center">
+  <div style="background:#fff; padding:2rem 3rem; border-radius:12px; text-align:center; box-shadow:0 4px 20px rgba(0,0,0,0.3)">
+    <div style="font-size:2rem; margin-bottom:1rem" class="spin-emoji">&#9881;</div>
+    <div style="font-size:1.2rem; font-weight:bold; color:#1565c0">AI 분석 중입니다</div>
+    <div style="font-size:0.9rem; color:#666; margin-top:0.5rem">사전 추천 + 유사공고 통계 기반 전략 리포트 생성 중</div>
+    <div style="font-size:0.85rem; color:#999; margin-top:0.75rem">잠시만 기다려주세요</div>
+  </div>
+</div>
+
+<style>
+@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+.spin-emoji { display:inline-block; animation: spin 2s linear infinite; }
+</style>
+
+<script>
+function showLoading() {
+  var ep = document.getElementById('estimated_price').value.trim();
+  if (!ep) return;
+  var overlay = document.getElementById('loading-overlay');
+  overlay.style.display = 'flex';
+  // disabled를 setTimeout으로 지연 — 폼 전송 취소 방지
+  setTimeout(function() {
+    document.getElementById('submit-btn').disabled = true;
+    document.getElementById('submit-btn').textContent = '생성 중...';
+  }, 100);
+}
+// bfcache 복원 시 오버레이 제거
+window.addEventListener('pageshow', function(e) {
+  if (e.persisted) {
+    document.getElementById('loading-overlay').style.display = 'none';
+    document.getElementById('submit-btn').disabled = false;
+    document.getElementById('submit-btn').textContent = '리포트 생성';
+  }
+});
+</script>
+
+{% if result %}
+<div class="result-box" style="margin-top:1.5rem">
+  <h2>사전 추천 결과 ({{ table_label }})</h2>
+
+  <div class="strategy-display" style="display:grid; grid-template-columns:repeat(3, 1fr); gap:0.75rem; text-align:center">
+    <div style="padding:1rem; background:#e8f5e9; border-radius:8px; border:2px solid #4caf50">
+      <div style="font-size:0.85rem; color:#2e7d32; font-weight:bold">보수적 (Safe)</div>
+      <div style="font-size:1.1rem; font-weight:bold; margin-top:0.25rem">{{ safe_bid_fmt }}원</div>
+    </div>
+    <div style="padding:1rem; background:#e3f2fd; border-radius:8px; border:2px solid #1976d2">
+      <div style="font-size:0.85rem; color:#1565c0; font-weight:bold">기본 (Base)</div>
+      <div style="font-size:1.1rem; font-weight:bold; margin-top:0.25rem">{{ optimal_bid_fmt }}원</div>
+    </div>
+    <div style="padding:1rem; background:#fff3e0; border-radius:8px; border:2px solid #f57c00">
+      <div style="font-size:0.85rem; color:#e65100; font-weight:bold">공격적 (Aggressive)</div>
+      <div style="font-size:1.1rem; font-weight:bold; margin-top:0.25rem">{{ aggressive_bid_fmt }}원</div>
+    </div>
+  </div>
+
+  <div class="floor-info" style="margin-top:1rem; padding:0.75rem; background:#fff8e1; border-left:4px solid #ff9800; border-radius:4px">
+    <strong>하한율 {{ floor_rate }}%</strong> | 최소 투찰가: {{ floor_rate_bid_fmt }}원 |
+    {% if floor_rate_pass %}<span style="color:#2e7d32; font-weight:bold">PASS</span>
+    {% else %}<span style="color:#c62828; font-weight:bold">FAIL</span>{% endif %}
+  </div>
+</div>
+
+{% if similar_stats %}
+<div class="result-box" style="margin-top:1rem">
+  <h2>유사공고 통계 ({{ similar_stats.count }}건)</h2>
+  <div class="result-grid">
+    <div class="result-item">
+      <div class="label">평균 참여업체</div>
+      <div class="value">{{ similar_stats.avg_bidder_cnt }}개사</div>
+    </div>
+    <div class="result-item">
+      <div class="label">낙찰률 P10</div>
+      <div class="value">{{ similar_stats.p10_rate }}</div>
+    </div>
+    <div class="result-item">
+      <div class="label">낙찰률 P50 (중앙)</div>
+      <div class="value">{{ similar_stats.p50_rate }}</div>
+    </div>
+    <div class="result-item">
+      <div class="label">낙찰률 P90</div>
+      <div class="value">{{ similar_stats.p90_rate }}</div>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+{% if report %}
+<div class="result-box" style="margin-top:1rem">
+  <h2>AI 전략 리포트</h2>
+
+  <div style="margin-bottom:1rem">
+    <h3 style="color:#1565c0; margin-bottom:0.5rem">요약</h3>
+    <p>{{ report.summary }}</p>
+  </div>
+
+  <div style="margin-bottom:1rem">
+    <h3 style="color:#2e7d32; margin-bottom:0.5rem">추천 전략</h3>
+    <p>{{ report.strategy }}</p>
+  </div>
+
+  {% if report.risk_factors %}
+  <div style="margin-bottom:1rem">
+    <h3 style="color:#c62828; margin-bottom:0.5rem">리스크 요인</h3>
+    <ul>
+      {% for risk in report.risk_factors %}
+      <li>{{ risk }}</li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+
+  {% if report.evidence %}
+  <div style="margin-bottom:1rem">
+    <h3 style="color:#6a1b9a; margin-bottom:0.5rem">근거</h3>
+    <ul>
+      {% for ev in report.evidence %}
+      <li>{{ ev }}</li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+
+  {% if report.action_items %}
+  <div style="margin-bottom:1rem">
+    <h3 style="color:#e65100; margin-bottom:0.5rem">액션 아이템</h3>
+    <ul>
+      {% for item in report.action_items %}
+      <li>{{ item }}</li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+
+<div class="disclaimer" style="margin-top:1rem">
+  이 리포트는 공고 정보와 유사공고 통계 기반의 사전 분석이며, 최종 투찰 결정은 입찰자의 책임입니다.
+</div>
+{% endif %}
+{% endblock %}

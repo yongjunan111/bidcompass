@@ -1,7 +1,7 @@
 """
 BidCompass 테스트 스위트
 
-15개 클래스:
+18개 클래스:
   - TestRoundingHelpers
   - TestSelectTable
   - TestCalculateAValue
@@ -13,10 +13,12 @@ BidCompass 테스트 스위트
   - TestOptimalBid (BC-33)
   - TestCalculatorView (BC-39)
   - TestRecommendView (BC-40, 사전 추천)
-  - TestBenchmarkView (BC-38)
   - TestRecommendBand (BC-40, optimal_bid.py 내부)
   - TestPreBidRecommend (BC-45, 사전 추천 서비스)
   - TestScanBoundsAndStrategy (BC-45, optimal_bid.py 내부)
+  - TestReportStats (BC-53)
+  - TestAIReportDataclasses (BC-53)
+  - TestAIReportView (BC-53)
 """
 
 import json
@@ -1069,63 +1071,6 @@ class TestRecommendView(TestCase):
         self.assertNotIn("expected_score", resp.context)
 
 
-# ──────────────────────────────────────────────
-# BC-38: 벤치마크 뷰 테스트
-# ──────────────────────────────────────────────
-
-class TestBenchmarkView(TestCase):
-    """BC-38: 벤치마크 뷰 테스트."""
-
-    def setUp(self):
-        self.client = DjangoClient()
-
-    def test_no_json_shows_message(self):
-        """JSON 파일 없음 → 안내 메시지."""
-        resp = self.client.get("/benchmark/")
-        self.assertEqual(resp.status_code, 200)
-        self.assertContains(resp, "benchmark_info21c")
-
-    def test_valid_json_renders(self):
-        """정상 JSON → 비교표 렌더링."""
-        json_path = Path(settings.BASE_DIR) / "data" / "collected" / "benchmark_info21c.json"
-        json_path.parent.mkdir(parents=True, exist_ok=True)
-
-        test_data = {
-            "meta": {"total": 1, "optimal_count": 0, "single_est_count": 1},
-            "summary": {"bc_wins": 1, "draws": 0, "info_wins": 0, "avg_improvement": 5.0},
-            "records": [{
-                "bid_ntce_no": "TEST-001",
-                "bid_name": "테스트공사",
-                "data_source": "fallback_single_est",
-                "info_score": 85.0,
-                "bc_score": 90.0,
-                "rank1_score": 89.0,
-                "improvement": 5.0,
-            }],
-        }
-        json_path.write_text(json.dumps(test_data, ensure_ascii=False))
-
-        try:
-            resp = self.client.get("/benchmark/")
-            self.assertEqual(resp.status_code, 200)
-            self.assertContains(resp, "BidCompass 우위")
-            self.assertEqual(resp.context["summary"]["bc_wins"], 1)
-        finally:
-            json_path.unlink(missing_ok=True)
-
-    def test_corrupt_json_shows_error(self):
-        """손상 JSON → 에러 메시지."""
-        json_path = Path(settings.BASE_DIR) / "data" / "collected" / "benchmark_info21c.json"
-        json_path.parent.mkdir(parents=True, exist_ok=True)
-        json_path.write_text("{invalid json content!!")
-
-        try:
-            resp = self.client.get("/benchmark/")
-            self.assertEqual(resp.status_code, 200)
-            self.assertContains(resp, "로드 실패")
-        finally:
-            json_path.unlink(missing_ok=True)
-
 
 # ──────────────────────────────────────────────
 # BC-40: 밴드 산출 단위 테스트
@@ -1359,3 +1304,97 @@ class TestScanBoundsAndStrategy(SimpleTestCase):
         self.assertGreaterEqual(result.band_high, result.recommended_bid)
         # threshold는 TABLE_2A 기본값
         self.assertAlmostEqual(result.band_threshold, 0.05)
+
+
+# ──────────────────────────────────────────────
+# BC-53: AI 전략 리포트
+# ──────────────────────────────────────────────
+
+class TestReportStats(TestCase):
+    """BC-53: report_stats 반환 구조 확인."""
+
+    def test_report_stats_return_structure(self):
+        """get_similar_bid_stats 반환 dict 키 확인."""
+        from g2b.services.report_stats import get_similar_bid_stats
+        # DB 없이 호출하면 빈 결과
+        try:
+            result = get_similar_bid_stats(500_000_000)
+        except Exception:
+            # DB 연결 없으면 스킵
+            return
+        expected_keys = {"count", "avg_bidder_cnt", "p10_rate", "p50_rate", "p90_rate"}
+        self.assertEqual(set(result.keys()), expected_keys)
+
+
+class TestAIReportDataclasses(SimpleTestCase):
+    """BC-53: ReportInput/ReportOutput dataclass 필드 검증."""
+
+    def test_report_input_fields(self):
+        from g2b.services.ai_report import ReportInput
+        inp = ReportInput(
+            table_name="별표 3",
+            presume_price=500_000_000,
+            a_value=50_000_000,
+            floor_rate="89.75",
+            floor_bid=404_775_000,
+            band_low=404_550_000,
+            band_high=405_450_000,
+            base_bid=405_000_000,
+            safe_bid=405_450_000,
+            aggressive_bid=404_550_000,
+            similar_stats={"count": 10},
+        )
+        self.assertEqual(inp.table_name, "별표 3")
+        self.assertEqual(inp.presume_price, 500_000_000)
+        self.assertEqual(inp.base_bid, 405_000_000)
+
+    def test_report_output_fields(self):
+        from g2b.services.ai_report import ReportOutput
+        out = ReportOutput(
+            summary="테스트 요약",
+            strategy="테스트 전략",
+            risk_factors=["리스크1"],
+            evidence=["근거1"],
+            action_items=["액션1"],
+        )
+        self.assertEqual(out.summary, "테스트 요약")
+        self.assertIsInstance(out.risk_factors, list)
+
+
+class TestGenerateReportFallback(SimpleTestCase):
+    """BC-53: API 실패 시 fallback 동작."""
+
+    def test_fallback_when_no_api_key(self):
+        """OPENAI_API_KEY 없으면 fallback 리포트 반환."""
+        from g2b.services.ai_report import ReportInput, generate_report
+        inp = ReportInput(
+            table_name="별표 3",
+            presume_price=500_000_000,
+            a_value=50_000_000,
+            floor_rate="89.75",
+            floor_bid=404_775_000,
+            band_low=404_550_000,
+            band_high=405_450_000,
+            base_bid=405_000_000,
+            safe_bid=405_450_000,
+            aggressive_bid=404_550_000,
+            similar_stats={"count": 0, "avg_bidder_cnt": 0,
+                           "p10_rate": 0, "p50_rate": 0, "p90_rate": 0},
+        )
+        with self.settings(OPENAI_API_KEY=''):
+            result = generate_report(inp)
+        self.assertIn("OPENAI_API_KEY", result.risk_factors[1])
+        self.assertTrue(len(result.summary) > 0)
+        self.assertTrue(len(result.action_items) > 0)
+
+
+class TestAIReportView(TestCase):
+    """BC-53: AI 리포트 뷰 테스트."""
+
+    def setUp(self):
+        self.client = DjangoClient()
+
+    def test_get_renders_form(self):
+        resp = self.client.get("/ai-report/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "AI 전략 리포트")

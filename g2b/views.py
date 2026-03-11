@@ -1,4 +1,4 @@
-"""BC-39/40/45: 가격점수 계산기 + 사전투찰 추천기 + 벤치마크 뷰."""
+"""BC-39/40/53: 가격점수 계산기 + 사전투찰 추천기 + 벤치마크 + AI 리포트 뷰."""
 
 import json
 from decimal import Decimal
@@ -19,6 +19,8 @@ from g2b.services.bid_engine import (
     select_table,
 )
 from g2b.services.prebid_recommend import prebid_recommend
+from g2b.services.ai_report import ReportInput, generate_report
+from g2b.services.report_stats import get_similar_bid_stats
 
 _HEATMAP_MAX_SCORES = frozenset({Decimal("90"), Decimal("80"), Decimal("70"), Decimal("50")})
 
@@ -254,3 +256,84 @@ def benchmark(request):
     context['records'] = data.get('records', [])
 
     return render(request, 'g2b/benchmark.html', context)
+
+
+# ──────────────────────────────────────────────
+# BC-53: AI 전략 리포트
+# ──────────────────────────────────────────────
+
+def ai_report(request):
+    """AI 전략 리포트 — 사전 추천 결과를 AI가 해설."""
+    context = {}
+    if request.method != 'POST':
+        return render(request, 'g2b/ai_report.html', context)
+
+    estimated_price = _parse_int(request.POST.get('estimated_price'))
+    base_amount = _parse_int(request.POST.get('base_amount'))
+    work_type_str = request.POST.get('work_type', 'construction')
+    a_value = _parse_int(request.POST.get('a_value'))
+    net_cost = _parse_int(request.POST.get('net_construction_cost')) or None
+
+    if estimated_price <= 0:
+        context['error'] = '추정가격을 입력하세요.'
+        context['form'] = request.POST
+        return render(request, 'g2b/ai_report.html', context)
+
+    if base_amount <= 0:
+        base_amount = estimated_price
+
+    work_type = (WorkType.SPECIALTY if work_type_str == 'specialty'
+                 else WorkType.CONSTRUCTION)
+
+    table_type = select_table(estimated_price, work_type)
+    if table_type == TableType.OUT_OF_SCOPE:
+        context['error'] = '추정가격 100억 이상은 적격심사 대상 외입니다.'
+        context['form'] = request.POST
+        return render(request, 'g2b/ai_report.html', context)
+
+    try:
+        result = prebid_recommend(
+            base_amount=base_amount,
+            a_value=a_value,
+            table_type=table_type,
+            presume_price=estimated_price,
+            net_construction_cost=net_cost,
+        )
+    except ValueError as e:
+        context['error'] = str(e)
+        context['form'] = request.POST
+        return render(request, 'g2b/ai_report.html', context)
+
+    # 유사공고 통계
+    similar_stats = get_similar_bid_stats(estimated_price)
+
+    # AI 리포트 생성
+    report_input = ReportInput(
+        table_name=result.table_label,
+        presume_price=estimated_price,
+        a_value=a_value,
+        floor_rate=f"{result.floor_rate:.2f}",
+        floor_bid=result.floor_rate_bid,
+        band_low=result.band_low,
+        band_high=result.band_high,
+        base_bid=result.optimal_bid,
+        safe_bid=result.safe_bid,
+        aggressive_bid=result.aggressive_bid,
+        similar_stats=similar_stats,
+    )
+    report = generate_report(report_input)
+
+    context['result'] = True
+    context['table_label'] = result.table_label
+    context['optimal_bid_fmt'] = f"{result.optimal_bid:,}"
+    context['optimal_score'] = f"{result.optimal_score:.0f}"
+    context['safe_bid_fmt'] = f"{result.safe_bid:,}"
+    context['aggressive_bid_fmt'] = f"{result.aggressive_bid:,}"
+    context['floor_rate'] = f"{result.floor_rate:.2f}"
+    context['floor_rate_bid_fmt'] = f"{result.floor_rate_bid:,}"
+    context['floor_rate_pass'] = result.floor_rate_pass
+    context['similar_stats'] = similar_stats
+    context['report'] = report
+    context['form'] = request.POST
+
+    return render(request, 'g2b/ai_report.html', context)
