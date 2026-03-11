@@ -1,12 +1,14 @@
-"""BC-39/40: 가격점수 계산기 + 최적투찰 추천기 + 벤치마크 뷰."""
+"""BC-39/40/45: 가격점수 계산기 + 사전투찰 추천기 + 벤치마크 뷰."""
 
 import json
-from collections import Counter
 from decimal import Decimal
 from pathlib import Path
 
 from django.conf import settings
+from django.http import JsonResponse
 from django.shortcuts import render
+
+from g2b.models import BidAnnouncement, BidApiAValue, BidApiPrelimPrice
 
 from g2b.services.bid_engine import (
     AValueItems,
@@ -16,20 +18,62 @@ from g2b.services.bid_engine import (
     get_floor_rate,
     select_table,
 )
-from g2b.services.optimal_bid import (
-    TABLE_PARAMS_MAP,
-    OptimalBidInput,
-    _score_fast,
-    compute_expected_score,
-    find_optimal_bid,
-    generate_scenarios,
-)
+from g2b.services.prebid_recommend import prebid_recommend
 
 _HEATMAP_MAX_SCORES = frozenset({Decimal("90"), Decimal("80"), Decimal("70"), Decimal("50")})
 
 
 def index(request):
     return render(request, 'g2b/index.html')
+
+
+# ──────────────────────────────────────────────
+# 공고번호 조회 API (자동 채움)
+# ──────────────────────────────────────────────
+
+def lookup_bid(request):
+    """공고번호로 추정가격 + A값 + 복수예비가격 조회 (JSON)."""
+    ntce_no = request.GET.get('bid_ntce_no', '').strip()
+    if not ntce_no:
+        return JsonResponse({'error': '공고번호를 입력하세요.'}, status=400)
+
+    # 공고 조회 (최신 차수)
+    ann = (BidAnnouncement.objects
+           .filter(bid_ntce_no=ntce_no)
+           .order_by('-bid_ntce_ord')
+           .first())
+    if not ann:
+        return JsonResponse({'error': f'공고번호 {ntce_no}을 찾을 수 없습니다.'}, status=404)
+
+    result = {
+        'bid_ntce_no': ann.bid_ntce_no,
+        'bid_ntce_ord': ann.bid_ntce_ord,
+        'bid_ntce_nm': ann.bid_ntce_nm,
+        'presume_price': ann.presume_price or 0,
+    }
+
+    # A값 조회
+    av = BidApiAValue.objects.filter(
+        bid_ntce_no=ann.bid_ntce_no,
+        bid_ntce_ord=ann.bid_ntce_ord,
+    ).first()
+    if av:
+        result['a_value'] = (
+            av.national_pension + av.health_insurance +
+            av.retirement_mutual_aid + av.long_term_care +
+            av.occupational_safety + av.safety_management +
+            av.quality_management
+        )
+    else:
+        result['a_value'] = 0
+
+    # 기초금액 조회 (복수예비가격 테이블에서)
+    prelim = (BidApiPrelimPrice.objects
+              .filter(bid_ntce_no=ann.bid_ntce_no, bid_ntce_ord=ann.bid_ntce_ord)
+              .first())
+    result['base_amount'] = prelim.base_amount if prelim else 0
+
+    return JsonResponse(result)
 
 
 # ──────────────────────────────────────────────
@@ -125,22 +169,12 @@ def calculator(request):
 # BC-40: 최적투찰 추천기
 # ──────────────────────────────────────────────
 
-def _get_prelim_values(post_data=None):
-    """POST 데이터에서 prelim_0~14 값을 리스트로 추출 (폼 유지용)."""
-    values = []
-    for i in range(15):
-        if post_data:
-            values.append(post_data.get(f'prelim_{i}', ''))
-        else:
-            values.append('')
-    return values
-
-
 def recommend(request):
-    context = {'prelim_values': _get_prelim_values()}
+    """사전 투찰 추천기 — 복수예비가격 없이 기초금액 기반."""
+    context = {}
     if request.method == 'POST':
-        context['prelim_values'] = _get_prelim_values(request.POST)
         estimated_price = _parse_int(request.POST.get('estimated_price'))
+        base_amount = _parse_int(request.POST.get('base_amount'))
         work_type_str = request.POST.get('work_type', 'construction')
         a_value = _parse_int(request.POST.get('a_value'))
         net_cost = _parse_int(request.POST.get('net_construction_cost')) or None
@@ -150,17 +184,8 @@ def recommend(request):
             context['form'] = request.POST
             return render(request, 'g2b/recommend.html', context)
 
-        # 복수예비가격 파싱 (최대 15개)
-        prelim_prices = []
-        for i in range(15):
-            val = _parse_int(request.POST.get(f'prelim_{i}'))
-            if val > 0:
-                prelim_prices.append(val)
-
-        if len(prelim_prices) < 4:
-            context['error'] = f'복수예비가격을 최소 4개 입력하세요 (현재 {len(prelim_prices)}개).'
-            context['form'] = request.POST
-            return render(request, 'g2b/recommend.html', context)
+        if base_amount <= 0:
+            base_amount = estimated_price
 
         work_type = (WorkType.SPECIALTY if work_type_str == 'specialty'
                      else WorkType.CONSTRUCTION)
@@ -172,95 +197,31 @@ def recommend(request):
             return render(request, 'g2b/recommend.html', context)
 
         try:
-            inp = OptimalBidInput(
-                preliminary_prices=prelim_prices,
+            result = prebid_recommend(
+                base_amount=base_amount,
                 a_value=a_value,
                 table_type=table_type,
                 presume_price=estimated_price,
                 net_construction_cost=net_cost,
             )
-            result = find_optimal_bid(inp)
         except ValueError as e:
             context['error'] = str(e)
             context['form'] = request.POST
             return render(request, 'g2b/recommend.html', context)
 
-        # 밴드 산출: optimal_bid ±100,000 범위에서 step=1,000
-        params = TABLE_PARAMS_MAP[table_type]
-        max_s = float(params.max_score)
-        coeff = float(params.coeff)
-        fixed_ratio = float(params.fixed_ratio)
-        fixed_score = float(params.fixed_score)
-
-        scenarios = generate_scenarios(prelim_prices)
-        optimal_bid = result.recommended_bid
-        optimal_score = result.expected_score
-
-        threshold = optimal_score - 0.05
-
-        band_bids = []
-        for offset in range(-100, 101):
-            test_bid = optimal_bid + offset * 1_000
-            if test_bid <= 0:
-                continue
-            es = compute_expected_score(
-                test_bid, scenarios, a_value,
-                max_s, coeff, fixed_ratio, fixed_score,
-            )
-            if es >= threshold:
-                band_bids.append(test_bid)
-
-        band_low = min(band_bids) if band_bids else optimal_bid
-        band_high = max(band_bids) if band_bids else optimal_bid
-
-        # 시나리오별 점수 분포 (고유 예정가격별)
-        scenario_counts = Counter(scenarios)
-        unique_scenarios = sorted(scenario_counts)
-        scenario_rows = []
-        for est in unique_scenarios:
-            score = _score_fast(
-                optimal_bid, est, a_value,
-                max_s, coeff, fixed_ratio, fixed_score,
-            )
-            count = scenario_counts[est]
-            scenario_rows.append({
-                'est_price': f"{est:,}",
-                'score': f"{score:.2f}",
-                'count': count,
-                'prob': f"{count / len(scenarios) * 100:.1f}",
-            })
-
-        table_label = {
-            TableType.TABLE_1: '별표 1',
-            TableType.TABLE_2A: '별표 2-가',
-            TableType.TABLE_2B: '별표 2-나',
-            TableType.TABLE_3: '별표 3',
-            TableType.TABLE_4: '별표 4',
-            TableType.TABLE_5: '별표 5',
-        }
-
-        # 하한율 정보 (BC-46)
-        floor_rate = get_floor_rate(estimated_price)
-        floor_rate_bid = result.floor_rate_bid
-        floor_rate_pass = result.recommended_bid >= floor_rate_bid
-
-        context['result'] = result
-        context['table_label'] = table_label.get(table_type, '')
-        context['band_low'] = band_low
-        context['band_high'] = band_high
-        context['band_low_fmt'] = f"{band_low:,}"
-        context['band_high_fmt'] = f"{band_high:,}"
-        context['optimal_bid_fmt'] = f"{optimal_bid:,}"
-        context['expected_score'] = f"{result.expected_score:.2f}"
-        context['min_score'] = f"{result.min_scenario_score:.2f}"
-        context['max_score'] = f"{result.max_scenario_score:.2f}"
-        context['n_scenarios'] = result.n_scenarios
-        context['n_unique_scenarios'] = len(unique_scenarios)
-        context['scenario_rows'] = scenario_rows
-        context['floor_rate'] = str(floor_rate)
-        context['floor_rate_bid'] = floor_rate_bid
-        context['floor_rate_bid_fmt'] = f"{floor_rate_bid:,}"
-        context['floor_rate_pass'] = floor_rate_pass
+        context['result'] = True
+        context['table_label'] = result.table_label
+        context['optimal_bid_fmt'] = f"{result.optimal_bid:,}"
+        context['optimal_score'] = f"{result.optimal_score:.0f}"
+        context['safe_bid_fmt'] = f"{result.safe_bid:,}"
+        context['aggressive_bid_fmt'] = f"{result.aggressive_bid:,}"
+        context['band_low_fmt'] = f"{result.band_low:,}"
+        context['band_high_fmt'] = f"{result.band_high:,}"
+        context['band_half_width'] = f"{result.band_half_width:.2f}"
+        context['floor_rate'] = f"{result.floor_rate:.2f}"
+        context['floor_rate_bid'] = result.floor_rate_bid
+        context['floor_rate_bid_fmt'] = f"{result.floor_rate_bid:,}"
+        context['floor_rate_pass'] = result.floor_rate_pass
         context['form'] = request.POST
 
     return render(request, 'g2b/recommend.html', context)

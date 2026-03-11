@@ -27,6 +27,29 @@ from decimal import Decimal
 
 
 # ──────────────────────────────────────────────
+# TABLE별 스캔 범위 / 밴드 임계값
+# ──────────────────────────────────────────────
+
+_SCAN_BOUNDS = {
+    TableType.TABLE_1:  (0.85, 0.95),
+    TableType.TABLE_2A: (0.87, 0.93),
+    TableType.TABLE_2B: (0.87, 0.93),
+    TableType.TABLE_3:  (0.89, 0.915),
+    TableType.TABLE_4:  (0.89, 0.915),
+    TableType.TABLE_5:  (0.89, 0.915),
+}
+
+_BAND_THRESHOLDS = {
+    TableType.TABLE_1:  0.10,
+    TableType.TABLE_2A: 0.05,
+    TableType.TABLE_2B: 0.05,
+    TableType.TABLE_3:  0.05,
+    TableType.TABLE_4:  0.05,
+    TableType.TABLE_5:  0.05,
+}
+
+
+# ──────────────────────────────────────────────
 # 데이터 구조
 # ──────────────────────────────────────────────
 
@@ -49,6 +72,12 @@ class OptimalBidResult:
     scan_steps: int                         # 스캔한 투찰금액 수
     floor_bid: Optional[int]                # 하한 제약 (적용된 경우)
     floor_rate_bid: Optional[int] = None    # 하한율 최소 투찰가 (전 시나리오 통과)
+    # BC-45: 3-strategy + band
+    band_threshold: float = 0.05            # 밴드 임계값 (TABLE별 차등)
+    band_low: int = 0                       # 밴드 하한
+    band_high: int = 0                      # 밴드 상한
+    safe_bid: Optional[int] = None          # 보수적 (band 내 최고 bid)
+    aggressive_bid: Optional[int] = None    # 공격적 (band 내 최저 bid)
 
 
 @dataclass
@@ -195,13 +224,14 @@ def find_optimal_bid(inp: OptimalBidInput) -> OptimalBidResult:
     fixed_ratio = float(params.fixed_ratio)
     fixed_score = float(params.fixed_score)
 
-    # 스캔 범위 결정
+    # 스캔 범위 결정 (BC-45: TABLE별 차등)
     min_est = min(scenarios)
     max_est = max(scenarios)
     a = inp.a_value
 
-    scan_lower = int(a + 0.86 * (min_est - a))
-    scan_upper = int(a + 0.93 * (max_est - a))
+    lb, ub = _SCAN_BOUNDS[inp.table_type]
+    scan_lower = int(a + lb * (min_est - a))
+    scan_upper = int(a + ub * (max_est - a))
 
     # 하드 제약: 순공사원가 × 98%
     floor_bid = None
@@ -267,6 +297,32 @@ def find_optimal_bid(inp: OptimalBidInput) -> OptimalBidResult:
     max_scenario_est = max(scenarios)
     floor_rate_bid = math.ceil(a + float(floor_rate) / 100 * (max_scenario_est - a))
 
+    # BC-45: 밴드 + 3-strategy 계산
+    band_threshold = _BAND_THRESHOLDS[inp.table_type]
+    threshold = final_expected - band_threshold
+
+    # floor 제약: floor_bid(순공사원가 98%)와 floor_rate_bid 중 큰 값
+    band_floor = max(
+        floor_bid or 0,
+        floor_rate_bid,
+    )
+
+    band_bids = []
+    for offset in range(-100, 101):
+        test_bid = recommended_bid + offset * 1_000
+        if test_bid <= 0 or test_bid < band_floor:
+            continue
+        es = compute_expected_score(
+            test_bid, scenarios, a, max_s, coeff, fixed_ratio, fixed_score,
+        )
+        if es >= threshold:
+            band_bids.append(test_bid)
+
+    band_low = min(band_bids) if band_bids else recommended_bid
+    band_high = max(band_bids) if band_bids else recommended_bid
+    safe_bid = band_high if band_high != recommended_bid else None
+    aggressive_bid = band_low if band_low != recommended_bid else None
+
     return OptimalBidResult(
         recommended_bid=recommended_bid,
         expected_score=final_expected,
@@ -276,6 +332,11 @@ def find_optimal_bid(inp: OptimalBidInput) -> OptimalBidResult:
         scan_steps=total_steps,
         floor_bid=floor_bid,
         floor_rate_bid=floor_rate_bid,
+        band_threshold=band_threshold,
+        band_low=band_low,
+        band_high=band_high,
+        safe_bid=safe_bid,
+        aggressive_bid=aggressive_bid,
     )
 
 

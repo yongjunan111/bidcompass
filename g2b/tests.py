@@ -1,7 +1,7 @@
 """
 BidCompass 테스트 스위트
 
-13개 클래스:
+15개 클래스:
   - TestRoundingHelpers
   - TestSelectTable
   - TestCalculateAValue
@@ -12,9 +12,11 @@ BidCompass 테스트 스위트
   - TestAssessmentRateFormula (BC-29)
   - TestOptimalBid (BC-33)
   - TestCalculatorView (BC-39)
-  - TestRecommendView (BC-40)
+  - TestRecommendView (BC-40, 사전 추천)
   - TestBenchmarkView (BC-38)
-  - TestRecommendBand (BC-40)
+  - TestRecommendBand (BC-40, optimal_bid.py 내부)
+  - TestPreBidRecommend (BC-45, 사전 추천 서비스)
+  - TestScanBoundsAndStrategy (BC-45, optimal_bid.py 내부)
 """
 
 import json
@@ -966,11 +968,11 @@ class TestCalculatorView(TestCase):
 
 
 # ──────────────────────────────────────────────
-# BC-40: 최적투찰 추천기 뷰 테스트
+# BC-40: 사전 투찰 추천기 뷰 테스트
 # ──────────────────────────────────────────────
 
 class TestRecommendView(TestCase):
-    """BC-40: 추천기 뷰 테스트."""
+    """BC-40: 사전 투찰 추천기 뷰 테스트."""
 
     def setUp(self):
         self.client = DjangoClient()
@@ -978,51 +980,43 @@ class TestRecommendView(TestCase):
     def test_get_renders_form(self):
         resp = self.client.get("/recommend/")
         self.assertEqual(resp.status_code, 200)
-        self.assertContains(resp, "최적투찰 추천기")
+        self.assertContains(resp, "사전 투찰 추천기")
 
-    def test_post_with_15_prices(self):
-        """15개 복수예비가격 → 1,365 시나리오."""
+    def test_post_basic(self):
+        """추정가격+A값만으로 추천 성공."""
         data = {
             "estimated_price": "500000000",
+            "base_amount": "500000000",
             "work_type": "construction",
             "a_value": "50000000",
         }
-        for i in range(15):
-            data[f"prelim_{i}"] = str(500_000_000 + i * 500_000)
-
         resp = self.client.post("/recommend/", data)
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.context["n_scenarios"], 1365)
         self.assertContains(resp, "추천 투찰 구간")
+        self.assertIn("optimal_bid_fmt", resp.context)
+        self.assertIn("safe_bid_fmt", resp.context)
+        self.assertIn("aggressive_bid_fmt", resp.context)
 
-    def test_post_with_4_prices(self):
-        """4개 복수예비가격 → 1 시나리오."""
+    def test_post_base_amount_defaults_to_estimated(self):
+        """기초금액 미입력 → 추정가격으로 대체."""
         data = {
             "estimated_price": "500000000",
             "work_type": "construction",
             "a_value": "0",
-            "prelim_0": "500000000",
-            "prelim_1": "501000000",
-            "prelim_2": "502000000",
-            "prelim_3": "503000000",
         }
         resp = self.client.post("/recommend/", data)
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.context["n_scenarios"], 1)
+        self.assertTrue(resp.context["result"])
 
-    def test_post_insufficient_prices(self):
-        """3개 미만 → 에러."""
+    def test_post_missing_estimated_price(self):
+        """추정가격 미입력 → 에러."""
         data = {
-            "estimated_price": "500000000",
             "work_type": "construction",
             "a_value": "0",
-            "prelim_0": "500000000",
-            "prelim_1": "501000000",
-            "prelim_2": "502000000",
         }
         resp = self.client.post("/recommend/", data)
         self.assertEqual(resp.status_code, 200)
-        self.assertContains(resp, "최소 4개")
+        self.assertContains(resp, "추정가격을 입력하세요")
 
     def test_post_out_of_scope(self):
         """100억 이상 → OUT_OF_SCOPE 에러."""
@@ -1031,21 +1025,18 @@ class TestRecommendView(TestCase):
             "work_type": "construction",
             "a_value": "0",
         }
-        for i in range(4):
-            data[f"prelim_{i}"] = str(10_000_000_000 + i * 1_000_000)
         resp = self.client.post("/recommend/", data)
         self.assertEqual(resp.status_code, 200)
         self.assertContains(resp, "적격심사 대상 외")
 
     def test_post_shows_floor_info(self):
-        """BC-46: 하한율 정보 표시 + PASS 포함."""
+        """하한율 정보 표시."""
         data = {
             "estimated_price": "500000000",
+            "base_amount": "500000000",
             "work_type": "construction",
             "a_value": "50000000",
         }
-        for i in range(15):
-            data[f"prelim_{i}"] = str(500_000_000 + i * 500_000)
         resp = self.client.post("/recommend/", data)
         self.assertEqual(resp.status_code, 200)
         self.assertContains(resp, "낙찰하한율")
@@ -1053,17 +1044,29 @@ class TestRecommendView(TestCase):
         self.assertIn("floor_rate_bid", resp.context)
 
     def test_post_floor_rate_bid_is_int(self):
-        """BC-46: floor_rate_bid 타입 확인."""
+        """floor_rate_bid 타입 확인."""
         data = {
             "estimated_price": "500000000",
+            "base_amount": "500000000",
             "work_type": "construction",
             "a_value": "50000000",
         }
-        for i in range(15):
-            data[f"prelim_{i}"] = str(500_000_000 + i * 500_000)
         resp = self.client.post("/recommend/", data)
         self.assertEqual(resp.status_code, 200)
         self.assertIsInstance(resp.context["floor_rate_bid"], int)
+
+    def test_post_no_scenario_in_context(self):
+        """사전 추천은 시나리오 엔진을 사용하지 않음."""
+        data = {
+            "estimated_price": "500000000",
+            "work_type": "construction",
+            "a_value": "0",
+        }
+        resp = self.client.post("/recommend/", data)
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotIn("n_scenarios", resp.context)
+        self.assertNotIn("scenario_rows", resp.context)
+        self.assertNotIn("expected_score", resp.context)
 
 
 # ──────────────────────────────────────────────
@@ -1208,3 +1211,151 @@ class TestRecommendBand(SimpleTestCase):
             if es >= threshold:
                 # 밴드 내 → threshold 이상이어야
                 self.assertGreaterEqual(es, threshold)
+
+
+# ──────────────────────────────────────────────
+# BC-45: 사전 추천 서비스 테스트
+# ──────────────────────────────────────────────
+
+class TestPreBidRecommend(SimpleTestCase):
+    """BC-45: prebid_recommend 서비스 테스트."""
+
+    def test_basic_recommendation(self):
+        """기본 사전 추천 — 결과 필드 존재 확인."""
+        from g2b.services.prebid_recommend import prebid_recommend
+        result = prebid_recommend(
+            base_amount=500_000_000,
+            a_value=50_000_000,
+            table_type=TableType.TABLE_3,
+            presume_price=500_000_000,
+        )
+        self.assertIsInstance(result.optimal_bid, int)
+        self.assertIsInstance(result.safe_bid, int)
+        self.assertIsInstance(result.aggressive_bid, int)
+        self.assertIsInstance(result.floor_rate_bid, int)
+        self.assertTrue(result.floor_rate_pass)
+
+    def test_optimal_at_90_percent(self):
+        """최적 bid는 ratio 90% 위치."""
+        from g2b.services.prebid_recommend import prebid_recommend
+        base = 500_000_000
+        a = 50_000_000
+        result = prebid_recommend(
+            base_amount=base,
+            a_value=a,
+            table_type=TableType.TABLE_3,
+            presume_price=base,
+        )
+        expected = round(a + 0.9 * (base - a))
+        self.assertEqual(result.optimal_bid, expected)
+
+    def test_band_contains_optimal(self):
+        """밴드가 optimal_bid를 포함."""
+        from g2b.services.prebid_recommend import prebid_recommend
+        result = prebid_recommend(
+            base_amount=500_000_000,
+            a_value=50_000_000,
+            table_type=TableType.TABLE_2A,
+            presume_price=20 * UNIT_EOUK,
+        )
+        self.assertLessEqual(result.band_low, result.optimal_bid)
+        self.assertGreaterEqual(result.band_high, result.optimal_bid)
+        self.assertEqual(result.safe_bid, result.band_high)
+        self.assertEqual(result.aggressive_bid, result.band_low)
+
+    def test_band_width_varies_by_table(self):
+        """TABLE별 밴드 폭이 다름 (coeff 차이)."""
+        from g2b.services.prebid_recommend import prebid_recommend
+        r1 = prebid_recommend(
+            base_amount=500_000_000, a_value=50_000_000,
+            table_type=TableType.TABLE_1, presume_price=60 * UNIT_EOUK,
+        )
+        r3 = prebid_recommend(
+            base_amount=500_000_000, a_value=50_000_000,
+            table_type=TableType.TABLE_3, presume_price=5 * UNIT_EOUK,
+        )
+        # TABLE_1(coeff=2)의 밴드가 TABLE_3(coeff=20)보다 훨씬 넓어야 함
+        width_1 = r1.band_high - r1.band_low
+        width_3 = r3.band_high - r3.band_low
+        self.assertGreater(width_1, width_3 * 5)
+
+    def test_floor_rate_enforcement(self):
+        """하한율 미달 시 밴드 하한이 floor_rate_bid 이상."""
+        from g2b.services.prebid_recommend import prebid_recommend
+        result = prebid_recommend(
+            base_amount=500_000_000,
+            a_value=50_000_000,
+            table_type=TableType.TABLE_3,
+            presume_price=500_000_000,
+        )
+        self.assertGreaterEqual(result.band_low, result.floor_rate_bid)
+
+    def test_no_scenario_dependency(self):
+        """prebid_recommend는 generate_scenarios를 사용하지 않음."""
+        import inspect
+        from g2b.services import prebid_recommend as mod
+        source = inspect.getsource(mod)
+        self.assertNotIn('generate_scenarios', source)
+        self.assertNotIn('OptimalBidInput', source)
+        self.assertNotIn('find_optimal_bid', source)
+
+    def test_out_of_scope_raises(self):
+        """OUT_OF_SCOPE → ValueError."""
+        from g2b.services.prebid_recommend import prebid_recommend
+        with self.assertRaises(ValueError):
+            prebid_recommend(
+                base_amount=10_000_000_000,
+                a_value=0,
+                table_type=TableType.OUT_OF_SCOPE,
+                presume_price=10_000_000_000,
+            )
+
+
+# ──────────────────────────────────────────────
+# BC-45: scan bounds + band threshold (optimal_bid.py 내부 테스트)
+# ──────────────────────────────────────────────
+
+class TestScanBoundsAndStrategy(SimpleTestCase):
+    """BC-45: TABLE별 scan bounds, band threshold, 3-strategy 테스트 (내부 엔진)."""
+
+    def test_scan_bounds_table2a(self):
+        """TABLE_2A bounds (0.87, 0.93) 확인."""
+        from g2b.services.optimal_bid import _SCAN_BOUNDS
+        lb, ub = _SCAN_BOUNDS[TableType.TABLE_2A]
+        self.assertAlmostEqual(lb, 0.87)
+        self.assertAlmostEqual(ub, 0.93)
+
+    def test_scan_bounds_table3(self):
+        """TABLE_3 bounds (0.89, 0.915) 확인."""
+        from g2b.services.optimal_bid import _SCAN_BOUNDS
+        lb, ub = _SCAN_BOUNDS[TableType.TABLE_3]
+        self.assertAlmostEqual(lb, 0.89)
+        self.assertAlmostEqual(ub, 0.915)
+
+    def test_band_threshold_table1(self):
+        """TABLE_1 threshold 0.10 적용 확인."""
+        from g2b.services.optimal_bid import _BAND_THRESHOLDS
+        self.assertAlmostEqual(_BAND_THRESHOLDS[TableType.TABLE_1], 0.10)
+
+    def test_three_strategy_fields(self):
+        """OptimalBidResult에 safe/aggressive 필드 존재 + 밴드 내 위치."""
+        from g2b.services.optimal_bid import OptimalBidInput, find_optimal_bid
+        prices = [500_000_000 + i * 500_000 for i in range(15)]
+        inp = OptimalBidInput(
+            preliminary_prices=prices,
+            a_value=5000_0000,
+            table_type=TableType.TABLE_2A,
+            presume_price=20 * UNIT_EOUK,
+        )
+        result = find_optimal_bid(inp)
+        # 필드 존재
+        self.assertTrue(hasattr(result, 'safe_bid'))
+        self.assertTrue(hasattr(result, 'aggressive_bid'))
+        self.assertTrue(hasattr(result, 'band_threshold'))
+        self.assertTrue(hasattr(result, 'band_low'))
+        self.assertTrue(hasattr(result, 'band_high'))
+        # 밴드 범위 정합성
+        self.assertLessEqual(result.band_low, result.recommended_bid)
+        self.assertGreaterEqual(result.band_high, result.recommended_bid)
+        # threshold는 TABLE_2A 기본값
+        self.assertAlmostEqual(result.band_threshold, 0.05)
