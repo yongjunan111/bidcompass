@@ -5,15 +5,15 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{% block title %}입찰나침반{% endblock %}</title>
-  <link rel="stylesheet" href="{% static 'g2b/style.css' %}">
+  <link rel="stylesheet" href="{% static 'g2b/style.css' %}?v=2">
 </head>
 <body>
   <nav class="navbar">
     <a href="{% url 'g2b:index' %}" class="nav-brand">입찰나침반</a>
     <div class="nav-links">
       <a href="{% url 'g2b:calculator' %}">가격점수 계산기</a>
-      <a href="{% url 'g2b:recommend' %}">최적투찰 추천기</a>
-      <a href="{% url 'g2b:benchmark' %}">벤치마크</a>
+      <a href="{% url 'g2b:recommend' %}">사전 추천</a>
+      <a href="{% url 'g2b:ai_report' %}">AI 리포트</a>
     </div>
   </nav>
   <main class="container">

@@ -22,10 +22,11 @@ cd bidcompass
 
 python -m venv .venv
 source .venv/bin/activate
-pip install -e .
+pip install -e .          # 패키지 관리: pip (uv 전환은 별도 이슈로 예정)
 
 cp .env.example .env
 # .env 편집: DB_PASSWORD, SECRET_KEY 필수 / API_KEY는 수집 시 필요
+# OPENAI_API_KEY는 AI 전략 리포트 사용 시 필요
 
 docker volume create bidcompass_pgdata
 docker compose up -d
@@ -37,7 +38,7 @@ python manage.py runserver
 ## Test
 
 ```bash
-python manage.py test g2b    # 110 tests, 14 classes
+python manage.py test g2b    # 119 tests, 18 classes
 ```
 
 ## Management Commands
@@ -99,10 +100,10 @@ python manage.py test g2b    # 110 tests, 14 classes
 bidcompass/
 ├── config/              # Django settings, urls, wsgi
 ├── g2b/                 # Main app (models, views, services, commands)
-│   ├── services/        # bid_engine.py, optimal_bid.py, g2b_client.py
+│   ├── services/        # bid_engine.py, optimal_bid.py, ai_report.py, report_stats.py, g2b_client.py
 │   ├── management/commands/  # 21 management commands
-│   └── tests.py         # 110 tests (11 SimpleTestCase + 3 TestCase)
-├── templates/g2b/       # 5 templates (calculator, recommend, benchmark, ...)
+│   └── tests.py         # 119 tests (14 SimpleTestCase + 4 TestCase)
+├── templates/g2b/       # 6 templates (calculator, recommend, ai_report, benchmark, ...)
 ├── static/g2b/          # style.css
 ├── scripts/             # pdf_to_markdown.py, test_api.py, test_new_apis.py
 ├── data/collected/      # API raw JSON, charts (gitignored)
