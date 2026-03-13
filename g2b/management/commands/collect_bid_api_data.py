@@ -505,7 +505,7 @@ class Command(BaseCommand):
             bid_ntce_ord=actual_ord,
             defaults={
                 **model_fields,
-                "price_decision_method": item.get("presmptPrceDcsnMthdNm", ""),
+                "price_decision_method": item.get("prearngPrceDcsnMthdNm", ""),
             },
         )
 

@@ -23,10 +23,28 @@ BidCompass 테스트 스위트
 
 import json
 from decimal import Decimal
+from datetime import timedelta
 from pathlib import Path
 
 from django.conf import settings
 from django.test import SimpleTestCase, TestCase, Client as DjangoClient
+from django.utils import timezone
+
+from g2b.models import BidAnnouncement, BidContract, BidResult
+from g2b.services.g2b_construction_sync import (
+    PLACEHOLDER_CONTRACT_NO,
+    PLACEHOLDER_PRELIM_SEQUENCE,
+    bulk_upsert,
+    is_eligible_notice_for_service,
+    is_upcoming_notice,
+    map_a_value_item,
+    map_base_amount_to_placeholder_prelim,
+    map_contract_item_to_bid_contract,
+    map_notice_to_announcement,
+    map_notice_to_contract,
+    map_prelim_price_item,
+    map_successful_bid_to_result,
+)
 
 from g2b.services.bid_engine import (
     AValueItems,
@@ -162,16 +180,22 @@ class TestSelectTable(SimpleTestCase):
             select_table(3 * UNIT_EOUK - 1, WorkType.SPECIALTY), TableType.TABLE_4
         )
 
-    def test_specialty_3_to_50eouk(self):
-        """전문공사 3~50억 전체 TABLE_2B."""
+    def test_specialty_3_to_10eouk_table2b(self):
+        """전문공사 3~10억 → TABLE_2B (별표2-나)."""
         self.assertEqual(
             select_table(3 * UNIT_EOUK, WorkType.SPECIALTY), TableType.TABLE_2B
         )
         self.assertEqual(
-            select_table(10 * UNIT_EOUK, WorkType.SPECIALTY), TableType.TABLE_2B
+            select_table(9 * UNIT_EOUK, WorkType.SPECIALTY), TableType.TABLE_2B
+        )
+
+    def test_specialty_10_to_50eouk_table2a(self):
+        """전문공사 10~50억 → TABLE_2A (별표2-가, 10억 이상은 업종 무관)."""
+        self.assertEqual(
+            select_table(10 * UNIT_EOUK, WorkType.SPECIALTY), TableType.TABLE_2A
         )
         self.assertEqual(
-            select_table(49 * UNIT_EOUK, WorkType.SPECIALTY), TableType.TABLE_2B
+            select_table(49 * UNIT_EOUK, WorkType.SPECIALTY), TableType.TABLE_2A
         )
 
     def test_specialty_50eouk_table1(self):
@@ -1398,3 +1422,476 @@ class TestAIReportView(TestCase):
         resp = self.client.get("/ai-report/")
         self.assertEqual(resp.status_code, 200)
         self.assertContains(resp, "AI 전략 리포트")
+
+
+class TestConstructionSyncMapping(SimpleTestCase):
+    """일일 건설공사 동기화 매핑 테스트."""
+
+    def test_notice_mapping_populates_current_models(self):
+        item = {
+            'bidNtceNo': 'R26BK01369994',
+            'bidNtceOrd': '000',
+            'refNtceNo': 'R26BK01369994',
+            'bidNtceNm': '2026년 포장도로 정비공사(연간단가)',
+            'ntceKindNm': '등록공고',
+            'opengPlce': '나라장터',
+            'reNtceYn': 'N',
+            'cnstrtsiteRgnNm': '서울특별시 중랑구',
+            'orderPlanUntyNo': 'R26DD20675014',
+            'bfSpecRgstNo': '',
+            'mainCnsttyNm': '지반조성ㆍ포장공사업',
+            'sucsfbidMthdCd': '낙030001',
+            'sucsfbidMthdNm': '적격심사제-추정가격이 10억원 미만 4억원 이상인 입찰공사',
+            'ntceInsttOfclNm': '문종민',
+            'ntceInsttOfclTelNo': '02-2094-1237',
+            'ntceInsttNm': '서울특별시 중랑구',
+            'presmptPrce': '901700000',
+            'bdgtAmt': '1329435590',
+            'govsplyAmt': '185144410',
+            'sucsfbidLwltRate': '89.745',
+            'rgnDutyJntcontrctRt': '',
+            'mainCnsttyPresmptPrce': '901700000',
+            'bidNtceDt': '2026-03-05 01:43:50',
+            'opengDt': '2026-03-12 11:00:00',
+            'bidMethdNm': '전자입찰',
+            'cntrctCnclsMthdNm': '제한경쟁',
+            'cntrctCnclsSttusNm': '총액계약',
+            'dminsttNm': '서울특별시 중랑구',
+            'dminsttCd': '3060000',
+            'ntceInsttCd': '3060000',
+        }
+
+        announcement = map_notice_to_announcement(item)
+        contract = map_notice_to_contract(item)
+
+        self.assertEqual(announcement['bid_ntce_no'], 'R26BK01369994')
+        self.assertEqual(announcement['site_area'], '서울특별시 중랑구')
+        self.assertEqual(announcement['license_limit_list'], '지반조성ㆍ포장공사업')
+        self.assertEqual(announcement['presume_price'], 901700000)
+
+        self.assertEqual(contract['procurement_type'], '공사')
+        self.assertEqual(contract['contract_no'], PLACEHOLDER_CONTRACT_NO)
+        self.assertEqual(contract['ntce_date'], '20260305')
+        self.assertEqual(contract['openg_date'], '20260312')
+        self.assertIn('적격심사제', contract['win_method'])
+
+    def test_notice_eligibility_uses_price_and_win_method(self):
+        eligible = {
+            'presmptPrce': '901700000',
+            'sucsfbidMthdNm': '적격심사제-추정가격이 10억원 미만 4억원 이상인 입찰공사',
+        }
+        ineligible = {
+            'presmptPrce': '12000000000',
+            'sucsfbidMthdNm': '적격심사제',
+        }
+
+        self.assertTrue(is_eligible_notice_for_service(eligible))
+        self.assertFalse(is_eligible_notice_for_service(ineligible))
+
+    def test_notice_upcoming_filter_uses_openg_datetime(self):
+        upcoming = {'opengDt': '2026-03-12 18:00:00'}
+        finished = {'opengDt': '2026-03-12 09:30:00'}
+
+        self.assertTrue(is_upcoming_notice(upcoming, '202603121100'))
+        self.assertFalse(is_upcoming_notice(finished, '202603121100'))
+
+    def test_bid_result_and_api_support_mapping(self):
+        notice_item = {
+            'presmptPrce': '901700000',
+            'sucsfbidLwltRate': '89.745',
+        }
+        result_item = {
+            'bidNtceNo': 'R26BK01371809',
+            'bidNtceOrd': '000',
+            'bidClsfcNo': '0',
+            'rbidNo': '000',
+            'bidNtceNm': '안양시 자원회수시설 소각로 내부 보수작업',
+            'prtcptCnum': '51',
+            'bidwinnrNm': '상신기계공영(주)',
+            'bidwinnrBizno': '1188118120',
+            'sucsfbidAmt': '193246660',
+            'sucsfbidRate': '90.075',
+        }
+        a_value_item = {
+            'bidNtceNo': 'R26BK01369994',
+            'bidNtceOrd': '000',
+            'sftyMngcst': '15542541',
+            'sftyChckMngcst': '34642830',
+            'rtrfundNon': '7893027',
+            'mrfnHealthInsrprm': '12337144',
+            'npnInsrprm': '16300817',
+            'odsnLngtrmrcprInsrprm': '1621100',
+            'qltyMngcst': '0',
+            'prearngPrceDcsnMthdNm': '복수예가',
+        }
+        prelim_item = {
+            'bidNtceNo': 'R26BK01369994',
+            'bidNtceOrd': '000',
+            'compnoRsrvtnPrceSno': '1',
+            'bsisPlnprc': '966587300',
+            'drwtYn': 'N',
+            'drwtNum': '77',
+            'plnprc': '995453175',
+            'bssamt': '991870000',
+        }
+        base_amount_item = {
+            'bidNtceNo': 'R26BK01369994',
+            'bidNtceOrd': '000',
+            'bssamt': '991870000',
+        }
+
+        bid_result = map_successful_bid_to_result(result_item, notice_item)
+        a_value = map_a_value_item(a_value_item)
+        prelim = map_prelim_price_item(prelim_item)
+        placeholder = map_base_amount_to_placeholder_prelim(base_amount_item)
+
+        self.assertEqual(bid_result['company_nm'], '상신기계공영(주)')
+        self.assertEqual(str(bid_result['bid_rate']), '90.075')
+        self.assertEqual(bid_result['presume_price'], 901700000)
+
+        self.assertEqual(a_value['national_pension'], 16300817)
+        self.assertEqual(a_value['price_decision_method'], '복수예가')
+
+        self.assertEqual(prelim['sequence_no'], 1)
+        self.assertEqual(prelim['base_amount'], 991870000)
+
+        self.assertEqual(placeholder['sequence_no'], PLACEHOLDER_PRELIM_SEQUENCE)
+        self.assertEqual(placeholder['base_amount'], 991870000)
+
+
+class TestUnifiedUiConstructionFilters(TestCase):
+    """Unified UI API가 건설 적격심사 공고만 노출하는지 검증."""
+
+    def setUp(self):
+        self.client = DjangoClient()
+        self.today = timezone.localdate().strftime('%Y%m%d')
+
+    def _create_notice(
+        self,
+        *,
+        bid_ntce_no: str,
+        title: str,
+        procurement_type: str,
+        win_method: str,
+        presume_price: int,
+        created_offset_minutes: int = 0,
+        openg_date: str | None = None,
+        license_limit_list: str = "[건축공사업(0002) 과 ()]",
+    ) -> None:
+        announcement = BidAnnouncement.objects.create(
+            bid_ntce_no=bid_ntce_no,
+            bid_ntce_ord="1",
+            bid_ntce_nm=title,
+            presume_price=presume_price,
+            license_limit_list=license_limit_list,
+            ntce_dept="테스트기관",
+        )
+        contract = BidContract.objects.create(
+            procurement_type=procurement_type,
+            bid_ntce_no=bid_ntce_no,
+            bid_ntce_ord="1",
+            bid_ntce_nm=title,
+            demand_org="테스트수요기관",
+            ntce_org="테스트공고기관",
+            openg_date=openg_date or self.today,
+            win_method=win_method,
+            bid_method="전자입찰",
+            presume_price=presume_price,
+            license_limit_list=license_limit_list,
+        )
+        created_at = timezone.now() + timedelta(minutes=created_offset_minutes)
+        BidAnnouncement.objects.filter(pk=announcement.pk).update(created_at=created_at)
+        BidContract.objects.filter(pk=contract.pk).update(created_at=created_at)
+
+    def test_dashboard_shows_only_construction_eligible_notices(self):
+        self._create_notice(
+            bid_ntce_no="CONTRACT-001",
+            title="칠곡경찰서 리모델링 공사(건축)",
+            procurement_type="공사",
+            win_method="적격심사제",
+            presume_price=1_405_763_637,
+        )
+        self._create_notice(
+            bid_ntce_no="SERVICE-001",
+            title="인도네시아 법령정보시스템 구축 사업 전산감리 용역",
+            procurement_type="일반용역",
+            win_method="협상에의한계약",
+            presume_price=244_940_602,
+            license_limit_list="[정보시스템 감리법인(6146) 과 ()]",
+        )
+        self._create_notice(
+            bid_ntce_no="NONELIGIBLE-001",
+            title="호서벤처밸리 공장동 바닥 에폭시 보수공사",
+            procurement_type="공사",
+            win_method="최저가낙찰제",
+            presume_price=78_800_000,
+            license_limit_list="[도장ㆍ습식ㆍ방수ㆍ석공사업(4992) 과 ()]",
+        )
+
+        response = self.client.get("/api/ui/dashboard/")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+
+        self.assertEqual(payload["metrics"][0]["label"], "오늘 개찰 건설공고")
+        self.assertEqual(payload["metrics"][0]["value"], "1건")
+        titles = [item["title"] for item in payload["todayNotices"]]
+        self.assertEqual(titles, ["칠곡경찰서 리모델링 공사(건축)"])
+
+    def test_notice_search_excludes_non_construction_notices(self):
+        self._create_notice(
+            bid_ntce_no="CONTRACT-002",
+            title="운남체육시설단지 재해복구공사",
+            procurement_type="공사",
+            win_method="적격심사제",
+            presume_price=231_054_546,
+        )
+        self._create_notice(
+            bid_ntce_no="SERVICE-002",
+            title="정보시스템 통합 유지관리 용역",
+            procurement_type="일반용역",
+            win_method="협상에의한계약",
+            presume_price=1_330_985_090,
+            license_limit_list="[소프트웨어사업자(컴퓨터관련서비스사업)(1468) 과 ()]",
+        )
+
+        included = self.client.get("/api/ui/notices/search/", {"query": "재해복구"})
+        self.assertEqual(included.status_code, 200)
+        included_payload = included.json()
+        self.assertEqual(included_payload["count"], 1)
+        self.assertEqual(
+            [row["title"] for row in included_payload["results"]],
+            ["운남체육시설단지 재해복구공사"],
+        )
+
+        excluded = self.client.get("/api/ui/notices/search/", {"query": "정보시스템"})
+        self.assertEqual(excluded.status_code, 200)
+        excluded_payload = excluded.json()
+        self.assertEqual(excluded_payload["count"], 0)
+        self.assertEqual(excluded_payload["results"], [])
+
+    def test_notice_search_filters_by_region(self):
+        self._create_notice(
+            bid_ntce_no="CONTRACT-REGION-001",
+            title="서울권역 도로 정비공사",
+            procurement_type="공사",
+            win_method="적격심사제",
+            presume_price=510_000_000,
+        )
+        self._create_notice(
+            bid_ntce_no="CONTRACT-REGION-002",
+            title="부산권역 도로 정비공사",
+            procurement_type="공사",
+            win_method="적격심사제",
+            presume_price=520_000_000,
+        )
+        BidContract.objects.filter(bid_ntce_no="CONTRACT-REGION-001").update(demand_org_area="서울")
+        BidContract.objects.filter(bid_ntce_no="CONTRACT-REGION-002").update(demand_org_area="부산")
+
+        response = self.client.get("/api/ui/notices/search/", {"region": "서울"})
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+
+        self.assertEqual(payload["count"], 1)
+        self.assertEqual(
+            [row["title"] for row in payload["results"]],
+            ["서울권역 도로 정비공사"],
+        )
+
+    def test_recommendation_default_and_direct_access_use_only_construction_scope(self):
+        self._create_notice(
+            bid_ntce_no="CONTRACT-003",
+            title="청년창업농 스마트팜 단지조성사업 온실공사",
+            procurement_type="공사",
+            win_method="적격심사제",
+            presume_price=6_740_713_637,
+            created_offset_minutes=1,
+        )
+        self._create_notice(
+            bid_ntce_no="SERVICE-003",
+            title="2026년도 한국조폐공사 임직원 종합건강검진 용역",
+            procurement_type="일반용역",
+            win_method="협상에의한계약",
+            presume_price=439_500_000,
+            created_offset_minutes=2,
+            license_limit_list="[의료기관개설허가(종합병원)(5373) 과 ()]",
+        )
+
+        response = self.client.get("/api/ui/notices/recommendation/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["notice"]["noticeNo"], "CONTRACT-003")
+
+        blocked = self.client.get("/api/ui/notices/recommendation/", {"bid_ntce_no": "SERVICE-003"})
+        self.assertEqual(blocked.status_code, 404)
+
+
+# ──────────────────────────────────────────────
+# fetch 커맨드 재작성 관련 테스트
+# ──────────────────────────────────────────────
+
+class TestBulkUpsert(TestCase):
+    """bulk_upsert() 공유 함수 테스트"""
+
+    def test_creates_new_rows(self):
+        rows = [
+            {
+                'bid_ntce_no': 'TEST001',
+                'bid_ntce_ord': '00',
+                'bid_ntce_nm': '테스트 공고 1',
+                'presume_price': 500000000,
+            },
+            {
+                'bid_ntce_no': 'TEST002',
+                'bid_ntce_ord': '00',
+                'bid_ntce_nm': '테스트 공고 2',
+                'presume_price': 300000000,
+            },
+        ]
+        created, updated = bulk_upsert(
+            BidAnnouncement, rows, unique_fields=['bid_ntce_no', 'bid_ntce_ord'],
+        )
+        self.assertEqual(created, 2)
+        self.assertEqual(updated, 0)
+        self.assertEqual(BidAnnouncement.objects.count(), 2)
+
+    def test_updates_existing_rows(self):
+        BidAnnouncement.objects.create(
+            bid_ntce_no='TEST001', bid_ntce_ord='00', bid_ntce_nm='원래 공고',
+        )
+        rows = [
+            {
+                'bid_ntce_no': 'TEST001',
+                'bid_ntce_ord': '00',
+                'bid_ntce_nm': '변경된 공고',
+                'presume_price': 500000000,
+            },
+        ]
+        created, updated = bulk_upsert(
+            BidAnnouncement, rows, unique_fields=['bid_ntce_no', 'bid_ntce_ord'],
+        )
+        self.assertEqual(created, 0)
+        self.assertEqual(updated, 1)
+        obj = BidAnnouncement.objects.get(bid_ntce_no='TEST001')
+        self.assertEqual(obj.bid_ntce_nm, '변경된 공고')
+
+    def test_empty_list(self):
+        created, updated = bulk_upsert(
+            BidAnnouncement, [], unique_fields=['bid_ntce_no', 'bid_ntce_ord'],
+        )
+        self.assertEqual(created, 0)
+        self.assertEqual(updated, 0)
+
+    def test_deduplicates_within_batch(self):
+        rows = [
+            {'bid_ntce_no': 'DUP001', 'bid_ntce_ord': '00', 'bid_ntce_nm': '첫번째'},
+            {'bid_ntce_no': 'DUP001', 'bid_ntce_ord': '00', 'bid_ntce_nm': '두번째'},
+        ]
+        created, updated = bulk_upsert(
+            BidAnnouncement, rows, unique_fields=['bid_ntce_no', 'bid_ntce_ord'],
+        )
+        self.assertEqual(created, 1)
+        self.assertEqual(updated, 0)
+        obj = BidAnnouncement.objects.get(bid_ntce_no='DUP001')
+        self.assertEqual(obj.bid_ntce_nm, '두번째')
+
+
+class TestAnnouncementMapping(SimpleTestCase):
+    """공고 매핑 함수 테스트"""
+
+    def test_map_notice_to_announcement(self):
+        item = {
+            'bidNtceNo': '20260101001',
+            'bidNtceOrd': '00',
+            'bidNtceNm': '테스트 건설공사',
+            'presmptPrce': '5000000000',
+            'sucsfbidLwltRate': '87.745',
+            'reNtceYn': 'N',
+        }
+        result = map_notice_to_announcement(item)
+        self.assertEqual(result['bid_ntce_no'], '20260101001')
+        self.assertEqual(result['bid_ntce_ord'], '00')
+        self.assertEqual(result['presume_price'], 5000000000)
+        self.assertEqual(result['first_ntce_yn'], 'Y')
+
+    def test_eligible_notice_filter(self):
+        eligible = {'presmptPrce': '5000000000', 'sucsfbidMthdNm': '적격심사제'}
+        ineligible_price = {'presmptPrce': '15000000000', 'sucsfbidMthdNm': '적격심사제'}
+        ineligible_method = {'presmptPrce': '5000000000', 'sucsfbidMthdNm': '최저가'}
+
+        self.assertTrue(is_eligible_notice_for_service(eligible))
+        self.assertFalse(is_eligible_notice_for_service(ineligible_price))
+        self.assertFalse(is_eligible_notice_for_service(ineligible_method))
+
+    def test_upcoming_notice_filter(self):
+        future = {'opengDt': '202612311200'}
+        past = {'opengDt': '202001010000'}
+        now_key = '202603131200'
+
+        self.assertTrue(is_upcoming_notice(future, now_key))
+        self.assertFalse(is_upcoming_notice(past, now_key))
+
+
+class TestWinningBidMapping(SimpleTestCase):
+    """낙찰결과 매핑 함수 테스트"""
+
+    def test_map_successful_bid_to_result(self):
+        item = {
+            'bidNtceNo': '20260101001',
+            'bidNtceOrd': '00',
+            'bidwinnrNm': '테스트건설',
+            'bidwinnrBizno': '1234567890',
+            'sucsfbidRate': '89.123',
+            'sucsfbidAmt': '4500000000',
+            'prtcptCnum': '15',
+        }
+        result = map_successful_bid_to_result(item, None)
+        self.assertEqual(result['bid_ntce_no'], '20260101001')
+        self.assertEqual(result['company_nm'], '테스트건설')
+        self.assertIsNone(result['presume_price'])
+        self.assertIsNone(result['success_lowest_rate'])
+
+    def test_enrichment_from_notice(self):
+        item = {
+            'bidNtceNo': '20260101001',
+            'bidNtceOrd': '00',
+            'bidwinnrNm': '테스트건설',
+            'bidwinnrBizno': '1234567890',
+        }
+        notice = {
+            'presmptPrce': '5000000000',
+            'sucsfbidLwltRate': '87.745',
+        }
+        result = map_successful_bid_to_result(item, notice)
+        self.assertEqual(result['presume_price'], 5000000000)
+
+
+class TestContractMapping(SimpleTestCase):
+    """계약 매핑 함수 테스트"""
+
+    def test_map_contract_item_to_bid_contract(self):
+        item = {
+            'bidNtceNo': '20260101001',
+            'bidNtceOrd': '00',
+            'cntrctNo': 'C2026010100001',
+            'rprsntCorpNm': '테스트건설',
+            'rprsntCorpBizrno': '1234567890',
+            'cntrctAmt': '4500000000',
+            'bidNtceNm': '테스트 건설공사',
+            'cntrctCnclsDe': '20260115',
+            'presmptPrce': '5000000000',
+        }
+        result = map_contract_item_to_bid_contract(item)
+        self.assertEqual(result['bid_ntce_no'], '20260101001')
+        self.assertEqual(result['contract_no'], 'C2026010100001')
+        self.assertEqual(result['company_nm'], '테스트건설')
+        self.assertEqual(result['contract_amt'], 4500000000)
+        self.assertEqual(result['procurement_type'], '공사')
+
+    def test_real_contract_no(self):
+        item = {
+            'bidNtceNo': '20260101001',
+            'bidNtceOrd': '00',
+            'cntrctNo': 'C2026010100001',
+        }
+        result = map_contract_item_to_bid_contract(item)
+        self.assertNotEqual(result['contract_no'], 'NOTICE')
+        self.assertEqual(result['contract_no'], 'C2026010100001')

@@ -230,8 +230,10 @@ def select_table(estimated_price: int, work_type: WorkType) -> TableType:
             return TableType.TABLE_4
         return TableType.TABLE_5
     else:  # SPECIALTY
+        if estimated_price >= 10 * UNIT_EOUK:
+            return TableType.TABLE_2A  # 10억 이상은 특수업종도 별표2-가
         if estimated_price >= 3 * UNIT_EOUK:
-            return TableType.TABLE_2B
+            return TableType.TABLE_2B  # 3~10억 특수업종만 별표2-나
         if estimated_price >= int(Decimal("0.8") * UNIT_EOUK):  # 8000만원
             return TableType.TABLE_4
         return TableType.TABLE_5
