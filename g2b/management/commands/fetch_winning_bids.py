@@ -1,146 +1,133 @@
-"""낙찰정보 수집 커맨드.
+"""건설공사 낙찰결과 수집 (Pipeline 2a).
 
-낙찰정보 API는 1일 범위만 허용하므로 일별로 반복 호출한다.
+낙찰 결과를 수집하고, notice enrichment(presume_price, success_lowest_rate)를 위해
+BidAnnouncement DB를 우선 조회한 뒤 누락건만 API로 보충합니다.
 
 사용:
     python manage.py fetch_winning_bids --days 3
-    python manage.py fetch_winning_bids --date 20260225
+    python manage.py fetch_winning_bids --days 1 --dry-run
 """
 
-import asyncio
-from datetime import datetime, timedelta
-from decimal import Decimal, InvalidOperation
+from __future__ import annotations
+
+from datetime import timedelta
 
 from django.core.management.base import BaseCommand
+from django.db import transaction
 from django.utils import timezone
 
-from g2b.models import FetchLog, SuccessfulBid
-from g2b.services.g2b_client import fetch_pages
-
-
-def parse_int(value) -> int | None:
-    if value is None or str(value).strip() == "":
-        return None
-    try:
-        return int(value)
-    except (ValueError, TypeError):
-        return None
-
-
-def parse_decimal(value) -> Decimal | None:
-    if value is None or str(value).strip() == "":
-        return None
-    try:
-        return Decimal(str(value))
-    except (InvalidOperation, ValueError, TypeError):
-        return None
-
-
-def upsert_winning_bids(items: list[dict]) -> tuple[int, int]:
-    """낙찰정보 upsert. (created, updated) 카운트 반환."""
-    created = 0
-    updated = 0
-    for item in items:
-        ntce_no = item.get("bidNtceNo", "")
-        ntce_ord = item.get("bidNtceOrd", "") or ""
-        bizno = item.get("bidprcCorpBizrno", "") or ""
-        if not ntce_no:
-            continue
-
-        _, was_created = SuccessfulBid.objects.update_or_create(
-            bid_ntce_no=ntce_no,
-            bid_ntce_ord=ntce_ord,
-            prcbdr_bizno=bizno,
-            defaults={
-                "prcbdr_nm": item.get("bidprcCorpNm", "") or "",
-                "rsrvtn_prce": parse_int(item.get("rsrvtnPrce")),
-                "bss_amt": parse_int(item.get("bssAmt")),
-                "presmpt_prce": parse_int(item.get("presmptPrce")),
-                "bidprc_amt": parse_int(item.get("bidprcAmt")),
-                "bidprc_rt": parse_decimal(item.get("bidprcRt")),
-                "sucsf_lwstlmt_rt": parse_decimal(item.get("sucsfLwstlmtRt")),
-                "sucsf_yn": item.get("sucsfYn", "") or "",
-                "openg_rank": parse_int(item.get("opengRank")),
-                "dqlfctn_rsn": item.get("dqlfctnRsn", "") or "",
-                "raw_data": item,
-            },
-        )
-        if was_created:
-            created += 1
-        else:
-            updated += 1
-    return created, updated
-
-
-async def _fetch_all_pages(date_str, callback=None):
-    """API에서 1일치 모든 페이지를 async로 가져와 리스트로 반환."""
-    params = {
-        "opengBgnDt": f"{date_str}0000",
-        "opengEndDt": f"{date_str}2359",
-        "bsnsDivCd": "3",  # 공사
-    }
-    all_items = []
-    async for items in fetch_pages("winning_bids", params, callback=callback):
-        all_items.extend(items)
-    return all_items
+from g2b.models import BidAnnouncement, BidResult
+from g2b.services.g2b_construction_client import (
+    fetch_construction_notices,
+    fetch_construction_successful_bids,
+)
+from g2b.services.g2b_construction_sync import (
+    bulk_upsert,
+    map_successful_bid_to_result,
+    ntce_key,
+)
 
 
 class Command(BaseCommand):
-    help = "G2B 낙찰정보를 수집하여 DB에 적재합니다 (1일 단위 반복)"
+    help = '건설공사 낙찰 결과를 수집하여 BidResult에 적재합니다.'
 
     def add_arguments(self, parser):
-        parser.add_argument("--days", type=int, help="최근 N일 수집")
-        parser.add_argument("--date", type=str, help="특정일 수집 (YYYYMMDD)")
+        parser.add_argument('--days', type=int, default=3, help='최근 N일 조회 (기본 3)')
+        parser.add_argument('--limit', type=int, default=0, help='최대 수집 건수')
+        parser.add_argument('--dry-run', action='store_true', help='DB 적재 없이 검증만')
 
     def handle(self, *args, **options):
-        now = datetime.now()
+        days = max(options['days'], 1)
+        limit = options['limit'] or None
+        dry_run = options['dry_run']
 
-        if options.get("date"):
-            dates = [options["date"]]
-        else:
-            days = options.get("days") or 3
-            dates = [
-                (now - timedelta(days=i)).strftime("%Y%m%d")
-                for i in range(days, 0, -1)
-            ]
+        now = timezone.localtime()
+        start = now - timedelta(days=days)
+        start_datetime = start.strftime('%Y%m%d0000')
+        end_datetime = now.strftime('%Y%m%d2359')
 
-        self.stdout.write(f"낙찰정보 수집: {len(dates)}일 ({dates[0]} ~ {dates[-1]})")
+        self.stdout.write(f'낙찰결과 수집: {start_datetime} ~ {end_datetime}')
 
-        for date_str in dates:
-            self.stdout.write(f"  {date_str} 수집 중...")
-            self._fetch_day(date_str)
-
-        self.stdout.write(self.style.SUCCESS("낙찰정보 수집 완료"))
-
-    def _fetch_day(self, date_str: str):
-        log = FetchLog.objects.create(
-            endpoint="winning_bids",
-            date_from=date_str,
-            date_to=date_str,
+        result_items = fetch_construction_successful_bids(
+            start_datetime=start_datetime,
+            end_datetime=end_datetime,
+            limit=limit,
+            callback=lambda page_no, fetched, total: self.stdout.write(
+                f'  낙찰 page {page_no}: {fetched}/{total}'
+            ),
         )
 
-        try:
-            def on_page(page_no, fetched, total):
-                self.stdout.write(f"    page {page_no}: {fetched}/{total}")
+        if not result_items:
+            self.stdout.write('  낙찰 결과 없음')
+            return
 
-            all_items = asyncio.run(_fetch_all_pages(date_str, callback=on_page))
-            created, updated = upsert_winning_bids(all_items)
+        # Notice enrichment: DB 우선 조회 → 누락건만 API 보충
+        ntce_keys = {ntce_key(item) for item in result_items}
+        ntce_nos = sorted({k[0] for k in ntce_keys})
 
-            log.status = "success"
-            log.total_count = len(all_items)
-            log.fetched_count = len(all_items)
-            log.created_count = created
-            log.updated_count = updated
+        # Step 1: DB에서 BidAnnouncement 조회
+        db_notices = BidAnnouncement.objects.filter(
+            bid_ntce_no__in=ntce_nos,
+        ).values('bid_ntce_no', 'bid_ntce_ord', 'presume_price', 'success_lowest_rate')
 
-        except Exception as e:
-            log.status = "error"
-            log.error_message = str(e)
-            self.stderr.write(self.style.ERROR(f"오류: {e}"))
-            created, updated = 0, 0
+        notice_index: dict[tuple[str, str], dict] = {}
+        for row in db_notices:
+            key = (row['bid_ntce_no'], row['bid_ntce_ord'])
+            notice_index[key] = {
+                'presmptPrce': row['presume_price'],
+                'sucsfbidLwltRate': row['success_lowest_rate'],
+            }
 
-        log.finished_at = timezone.now()
-        log.save()
+        # Step 2: DB에 없는 공고만 API로 보충
+        missing_keys = ntce_keys - set(notice_index.keys())
+        if missing_keys:
+            self.stdout.write(f'  notice enrichment: DB {len(notice_index)}건, API 보충 {len(missing_keys)}건')
+            api_notice_items = fetch_construction_notices(
+                start_datetime=start_datetime,
+                end_datetime=end_datetime,
+                callback=lambda page_no, fetched, total: self.stdout.write(
+                    f'  공고 page {page_no}: {fetched}/{total}'
+                ),
+            )
+            for item in api_notice_items:
+                key = ntce_key(item)
+                if key in missing_keys:
+                    notice_index[key] = item
+                    missing_keys.discard(key)
+                    if not missing_keys:
+                        break
+        else:
+            self.stdout.write(f'  notice enrichment: DB에서 전부 조회 ({len(notice_index)}건)')
+
+        # 매핑
+        result_rows = [
+            map_successful_bid_to_result(item, notice_index.get(ntce_key(item)))
+            for item in result_items
+        ]
+
+        self.stdout.write(f'  낙찰결과 {len(result_rows):,}건')
+
+        if dry_run:
+            self.stdout.write(self.style.WARNING('dry-run: DB에는 적재하지 않습니다.'))
+            if result_rows:
+                sample = result_rows[0]
+                self.stdout.write(
+                    f"  sample: [{sample['bid_ntce_no']}] {sample['company_nm']} / rate={sample['bid_rate']}"
+                )
+            return
+
+        with transaction.atomic():
+            created, updated = bulk_upsert(
+                BidResult,
+                result_rows,
+                unique_fields=[
+                    'bid_ntce_no', 'bid_ntce_ord', 'company_bizno',
+                    'bid_class_no', 'bid_progress_ord',
+                ],
+            )
 
         self.stdout.write(
-            f"  결과: 수집={log.fetched_count} 신규={created} 갱신={updated}"
+            self.style.SUCCESS(
+                f'  적재 완료 (신규 {created:,} / 갱신 {updated:,})'
+            )
         )
