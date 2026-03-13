@@ -92,6 +92,16 @@ def _parse_int(value, default=0):
         return default
 
 
+def _format_bid_rate(bid_amount: int, base_amount: int, a_value: int) -> str:
+    """추천 금액을 기준으로 투찰률(% ) 문자열을 만든다."""
+    denominator = base_amount - a_value
+    if denominator <= 0:
+        return "-"
+
+    rate = (bid_amount - a_value) / denominator * 100
+    return f"{rate:.3f}%"
+
+
 def calculator(request):
     context = {}
     if request.method == 'POST':
@@ -224,6 +234,12 @@ def recommend(request):
         context['floor_rate_bid'] = result.floor_rate_bid
         context['floor_rate_bid_fmt'] = f"{result.floor_rate_bid:,}"
         context['floor_rate_pass'] = result.floor_rate_pass
+        context['estimated_price_fmt'] = f"{estimated_price:,}"
+        context['base_amount_fmt'] = f"{base_amount:,}"
+        context['a_value_fmt'] = f"{a_value:,}"
+        context['safe_rate'] = _format_bid_rate(result.safe_bid, base_amount, a_value)
+        context['optimal_rate'] = _format_bid_rate(result.optimal_bid, base_amount, a_value)
+        context['aggressive_rate'] = _format_bid_rate(result.aggressive_bid, base_amount, a_value)
         context['form'] = request.POST
 
     return render(request, 'g2b/recommend.html', context)

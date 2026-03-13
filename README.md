@@ -35,6 +35,8 @@ python manage.py migrate
 python manage.py runserver
 ```
 
+배치 파이프라인(공고 수집, 낙찰/계약 수집, A값 수집)을 자동화하려면 `docker compose up -d`로 전체 서비스를 실행합니다. 개별 실행: `docker compose up -d scheduler_announcements scheduler_results scheduler_api_data`.
+
 ## Test
 
 ```bash
@@ -54,10 +56,11 @@ python manage.py test g2b    # 119 tests, 18 classes
 
 | 커맨드 | 설명 |
 |--------|------|
-| `fetch_announcements` | G2B 입찰공고정보 수집 |
-| `fetch_contracts` | G2B 계약정보 수집 |
-| `fetch_winning_bids` | G2B 낙찰정보 수집 (1일 단위) |
-| `collect_bid_api_data` | DB 기반 A값 + 복수예비가격 API 수집 |
+| `fetch_announcements` | **Pipeline 1**: 서비스용 건설공사 공고 수집 → BidAnnouncement + BidContract(NOTICE) |
+| `fetch_winning_bids` | **Pipeline 2a**: 낙찰결과 수집 → BidResult (DB 우선 notice enrichment) |
+| `fetch_contracts` | **Pipeline 2b**: 계약정보 수집 → BidContract (범용 API, 건설공사 필터) |
+| `collect_bid_api_data` | **Pipeline 3**: DB 기반 A값 + 복수예비가격 API 수집 |
+| `sync_recent_construction_data` | 위 1~2 통합 래퍼 (개별 커맨드 권장) |
 | `collect_bid_data` | [DEPRECATED] 엑셀 기반 수집 -> collect_bid_api_data 사용 |
 
 ### 검증

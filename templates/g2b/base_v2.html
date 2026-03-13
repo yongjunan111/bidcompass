@@ -1,0 +1,92 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}입찰나침반{% endblock %}</title>
+  <link rel="stylesheet" href="{% static 'g2b/style_v2.css' %}?v=1">
+  {% block extra_head %}{% endblock %}
+</head>
+<body class="bc2-page">
+  <div class="page">
+    <div class="app-shell">
+      <div class="window-bar">
+        <div class="dots" aria-hidden="true">
+          <span class="dot red"></span>
+          <span class="dot yellow"></span>
+          <span class="dot green"></span>
+        </div>
+        <div class="address">bidcompass.local / {% block address_path %}workspace{% endblock %}</div>
+      </div>
+
+      <div class="layout">
+        <aside class="sidebar">
+          <div class="brand">
+            <a href="{% url 'g2b:index' %}" class="brand-title">BidCompass</a>
+            <div class="brand-sub">나라장터 적격심사 규칙 엔진 + AI 지원</div>
+          </div>
+
+          <nav class="nav" aria-label="주요 메뉴">
+            <a href="{% url 'g2b:index' %}" class="nav-item {% block nav_home_class %}{% endblock %}">
+              <span class="nav-bullet"></span>
+              홈
+            </a>
+            <a href="{% url 'g2b:calculator' %}" class="nav-item {% block nav_calculator_class %}{% endblock %}">
+              <span class="nav-bullet"></span>
+              가격 계산
+            </a>
+            <a href="{% url 'g2b:recommend' %}" class="nav-item {% block nav_recommend_class %}{% endblock %}">
+              <span class="nav-bullet"></span>
+              사전 추천
+            </a>
+            <a href="{% url 'g2b:ai_report' %}" class="nav-item {% block nav_report_class %}{% endblock %}">
+              <span class="nav-bullet"></span>
+              AI 리포트
+            </a>
+          </nav>
+
+          <section class="side-card">
+            {% block sidebar_primary %}
+            <h4>설계 기준</h4>
+            <ul>
+              <li>왼쪽은 이동, 가운데는 판단, 오른쪽은 요약으로 분리합니다.</li>
+              <li>자주 보는 숫자를 먼저 보여주고, 세부 판단은 아래에 둡니다.</li>
+              <li>계산 결과와 다음 액션이 한 화면에서 이어지게 구성합니다.</li>
+            </ul>
+            {% endblock %}
+          </section>
+
+          {% block sidebar_secondary %}
+          <section class="side-card">
+            <h4>운영 메모</h4>
+            <p>추천 결과, 하한율 판정, AI 리포트 진입이 한 흐름으로 이어지는 구조를 목표로 합니다.</p>
+          </section>
+          {% endblock %}
+        </aside>
+
+        <main class="main">
+          {% block header %}
+          <div class="eyebrow">{% block eyebrow %}분석 화면{% endblock %}</div>
+          <h1 class="page-title">{% block page_title %}입찰나침반{% endblock %}</h1>
+          <p class="page-subtitle">{% block page_subtitle %}실무자가 바로 판단할 수 있도록 계산과 설명을 함께 제공합니다.{% endblock %}</p>
+          {% endblock %}
+
+          {% block content %}{% endblock %}
+        </main>
+
+        <aside class="aside">
+          {% block aside_content %}
+          <section class="summary-card">
+            <h2 class="summary-title">오른쪽 패널</h2>
+            <p class="muted-note">페이지별 요약과 실행 액션이 이 영역에 들어갑니다.</p>
+          </section>
+          {% endblock %}
+        </aside>
+      </div>
+    </div>
+  </div>
+
+  {% block extra_scripts %}{% endblock %}
+</body>
+</html>

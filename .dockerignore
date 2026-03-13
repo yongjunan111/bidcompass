@@ -1,0 +1,14 @@
+.venv/
+.git/
+.omc/
+.claude/
+data/collected/
+docs/
+*.egg-info/
+__pycache__/
+*.pyc
+.env
+frontend/node_modules/
+frontend/dist/
+static/frontend/
+staticfiles/

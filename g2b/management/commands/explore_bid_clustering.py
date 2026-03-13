@@ -620,12 +620,9 @@ class Command(BaseCommand):
         self.stdout.write("  [3-2] 업체 쌍 근접도 (co-occurrence)")
         pairs = self._task3_2_pairs()
         result["pairs"] = pairs
-        self.stdout.write(
-            f"    근접 쌍 {pairs['pair_count']}개 (avg_diff < 0.5%p)"
-        )
 
         # 3-3. 퍼뮤테이션 테스트
-        self.stdout.write("  [3-3] 퍼뮤테이션 테스트 (100회)")
+        self.stdout.write("  [3-3] 퍼뮤테이션 테스트 (1000회)")
         perm = self._task3_3_permutation(pairs["pair_count"])
         result["permutation_test"] = perm
         self.stdout.write(
@@ -722,8 +719,17 @@ class Command(BaseCommand):
             "top_hotspots": top_hotspots,
         }
 
+    # 관측/null 동일 threshold (BC-51 버그 수정: 0.5 → 0.2)
+    PAIR_THRESHOLD = 0.2
+
     def _task3_2_pairs(self) -> dict:
-        """업체 쌍 근접도. top-500 frequent 업체 + 별도 temp table로 DB OOM 방지."""
+        """업체 쌍 근접도. top-500 frequent 업체 + 별도 temp table로 DB OOM 방지.
+
+        BC-51 버그 수정:
+        - LIMIT 200 제거 → COUNT(*) only로 정확한 observed 산출
+        - threshold 0.5 → 0.2 (검정력 향상)
+        - _cluster_freq_data 유지 (Task 3.3에서 재사용)
+        """
         with connection.cursor() as cur:
             # 5회+ 참여 업체 (top 500, 참여 빈도순)
             cur.execute("DROP TABLE IF EXISTS _cluster_frequent")
@@ -769,8 +775,24 @@ class Command(BaseCommand):
             freq_data_count = cur.fetchone()[0]
             self.stdout.write(f"    freq 데이터: {freq_data_count:,}건")
 
-            # self-join on small temp table
-            cur.execute("""
+            # 정확한 pair count (LIMIT 없음)
+            cur.execute(f"""
+                SELECT COUNT(*) FROM (
+                    SELECT a.company_bizno, b.company_bizno
+                    FROM _cluster_freq_data a
+                    INNER JOIN _cluster_freq_data b
+                        ON a.bid_ntce_no = b.bid_ntce_no
+                        AND a.bid_ntce_ord = b.bid_ntce_ord
+                        AND a.company_bizno < b.company_bizno
+                    GROUP BY a.company_bizno, b.company_bizno
+                    HAVING COUNT(*) >= 3
+                        AND AVG(ABS(a.bid_rate - b.bid_rate)) < {self.PAIR_THRESHOLD}
+                ) t
+            """)
+            pair_count = cur.fetchone()[0]
+
+            # 상위 30쌍만 표시용으로 조회
+            cur.execute(f"""
                 SELECT a.company_bizno AS biz_a,
                        b.company_bizno AS biz_b,
                        COUNT(*) AS co_count,
@@ -782,15 +804,15 @@ class Command(BaseCommand):
                     AND a.company_bizno < b.company_bizno
                 GROUP BY a.company_bizno, b.company_bizno
                 HAVING COUNT(*) >= 3
-                    AND AVG(ABS(a.bid_rate - b.bid_rate)) < 0.5
+                    AND AVG(ABS(a.bid_rate - b.bid_rate)) < {self.PAIR_THRESHOLD}
                 ORDER BY avg_rate_diff
-                LIMIT 200
+                LIMIT 30
             """)
             pair_rows = cur.fetchall()
-            cur.execute("DROP TABLE IF EXISTS _cluster_freq_data")
+            # _cluster_freq_data 유지 (Task 3.3에서 재사용)
 
         top_pairs = []
-        for biz_a, biz_b, co_count, avg_diff in pair_rows[:30]:
+        for biz_a, biz_b, co_count, avg_diff in pair_rows:
             top_pairs.append({
                 "biz_a": biz_a,
                 "biz_b": biz_b,
@@ -800,11 +822,16 @@ class Command(BaseCommand):
 
         result = {
             "frequent_companies": frequent_count,
-            "pair_count": len(pair_rows),
+            "pair_count": pair_count,
+            "threshold": self.PAIR_THRESHOLD,
             "top_pairs": top_pairs,
         }
 
         # 상위 5쌍 출력
+        self.stdout.write(
+            f"    근접 쌍 {pair_count}개 "
+            f"(co≥3, avg_diff<{self.PAIR_THRESHOLD}%p)"
+        )
         if top_pairs:
             self.stdout.write("    상위 근접 쌍:")
             for p in top_pairs[:5]:
@@ -817,35 +844,34 @@ class Command(BaseCommand):
         return result
 
     def _task3_3_permutation(self, observed_count: int) -> dict:
-        """퍼뮤테이션 테스트: 100회 셔플로 null distribution 생성.
+        """퍼뮤테이션 테스트: 1000회 셔플로 null distribution 생성.
 
-        메모리 보호: frequent 업체가 2명+ 참여하는 공고만, 최대 500개 샘플.
+        BC-51 버그 수정:
+        - _cluster_freq_data 재사용 (Task 3.2와 동일 공고 집합)
+        - threshold 동일 (PAIR_THRESHOLD)
+        - 1000회 퍼뮤테이션
+        - empirical p = (1 + exceedances) / (B + 1)
         """
-        # frequent 업체가 2명+ 있는 공고만 추출 (SQL에서 필터)
+        # Task 3.2에서 만든 _cluster_freq_data 재사용 (동일 공고 집합)
         with connection.cursor() as cur:
             cur.execute("""
-                SELECT b.bid_ntce_no, b.bid_ntce_ord,
-                       b.company_bizno, b.bid_rate::float
-                FROM _cluster_base b
-                INNER JOIN _cluster_frequent f
-                    ON b.company_bizno = f.company_bizno
-                WHERE (b.bid_ntce_no, b.bid_ntce_ord) IN (
-                    SELECT b2.bid_ntce_no, b2.bid_ntce_ord
-                    FROM _cluster_base b2
-                    INNER JOIN _cluster_frequent f2
-                        ON b2.company_bizno = f2.company_bizno
-                    GROUP BY b2.bid_ntce_no, b2.bid_ntce_ord
+                SELECT bid_ntce_no, bid_ntce_ord,
+                       company_bizno, bid_rate::float
+                FROM _cluster_freq_data
+                WHERE (bid_ntce_no, bid_ntce_ord) IN (
+                    SELECT bid_ntce_no, bid_ntce_ord
+                    FROM _cluster_freq_data
+                    GROUP BY bid_ntce_no, bid_ntce_ord
                     HAVING COUNT(*) >= 2
-                    ORDER BY RANDOM()
-                    LIMIT 500
                 )
-                ORDER BY b.bid_ntce_no, b.bid_ntce_ord
+                ORDER BY bid_ntce_no, bid_ntce_ord
             """)
             rows = cur.fetchall()
+            cur.execute("DROP TABLE IF EXISTS _cluster_freq_data")
 
         self.stdout.write(
             f"    퍼뮤테이션 대상: {len(rows):,}건 "
-            f"(frequent 업체 2명+ 공고, 최대 500개)"
+            f"(freq 업체 2명+ 공고)"
         )
 
         if not rows:
@@ -862,11 +888,13 @@ class Command(BaseCommand):
             f"평균 {len(rows) / max(len(by_announcement), 1):.1f}명/공고"
         )
 
-        # 퍼뮤테이션 100회
+        # 퍼뮤테이션 1000회
+        n_perms = 1000
+        threshold = self.PAIR_THRESHOLD
         rng = random.Random(42)
         null_counts = []
 
-        for trial in range(100):
+        for trial in range(n_perms):
             # 각 공고 내에서 bid_rate만 셔플
             pair_diffs: dict[tuple, list[float]] = {}
             for key, entries in by_announcement.items():
@@ -885,16 +913,15 @@ class Command(BaseCommand):
                             abs(rates[i] - rates[j])
                         )
 
-            # 기준: co_count >= 3, avg_diff < 0.5
             cnt = sum(
                 1 for diffs in pair_diffs.values()
                 if len(diffs) >= 3
-                and statistics.mean(diffs) < 0.5
+                and statistics.mean(diffs) < threshold
             )
             null_counts.append(cnt)
 
-            if (trial + 1) % 25 == 0:
-                self.stdout.write(f"    셔플 {trial + 1}/100 완료")
+            if (trial + 1) % 250 == 0:
+                self.stdout.write(f"    셔플 {trial + 1}/{n_perms} 완료")
 
         null_mean = statistics.mean(null_counts)
         null_stdev = (
@@ -907,9 +934,9 @@ class Command(BaseCommand):
             (observed_count - null_mean) / null_stdev
             if null_stdev > 0 else 0.0
         )
-        p_value = sum(
-            1 for c in null_counts if c >= observed_count
-        ) / len(null_counts)
+        # empirical p = (1 + exceedances) / (B + 1)
+        exceedances = sum(1 for c in null_counts if c >= observed_count)
+        p_value = (1 + exceedances) / (n_perms + 1)
 
         return {
             "observed": observed_count,
@@ -919,8 +946,9 @@ class Command(BaseCommand):
             "null_min": min(null_counts),
             "null_max": max(null_counts),
             "z_score": round(z_score, 2),
-            "p_value": round(p_value, 4),
-            "n_permutations": 100,
+            "p_value": round(p_value, 6),
+            "n_permutations": n_perms,
+            "threshold": threshold,
         }
 
     def _empty_permutation_result(self, observed_count: int) -> dict:
