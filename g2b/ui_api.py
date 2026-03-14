@@ -42,6 +42,8 @@ class NoticeBundle:
     a_value_total: int
     base_amount: int
     estimated_price: int
+    a_value_source: str = 'missing'       # 'confirmed' | 'missing'
+    base_amount_source: str = 'missing'   # 'confirmed' | 'missing'
 
 
 SUPPORTED_PRESUME_PRICE_LIMIT = 10_000_000_000
@@ -159,10 +161,15 @@ def _eligible_contract_queryset():
         BidContract.objects.filter(
             procurement_type='공사',
             win_method__icontains='적격',
+            license_limit_list__icontains='건축공사업',
             presume_price__gt=0,
             presume_price__lt=SUPPORTED_PRESUME_PRICE_LIMIT,
         )
         .exclude(bid_ntce_nm='')
+        .exclude(
+            Q(license_limit_list__icontains='실내건축공사업')
+            & ~Q(license_limit_list__icontains='건축공사업(0002)')
+        )
     )
 
 
@@ -275,6 +282,11 @@ def _lookup_notice_bundle(bid_ntce_no: str, bid_ntce_ord: str | None = None) -> 
             + a_value.quality_management
         )
 
+    # Canonical source: record existence (NOT BidAnnouncement.a_value_status)
+    # status 필드는 배치 메타데이터이며, 추천 판정에 사용하지 않음
+    a_value_source = 'confirmed' if a_value else 'missing'
+    base_amount_source = 'confirmed' if prelim else 'missing'
+
     estimated_price = announcement.presume_price or (contract.presume_price if contract else 0) or 0
     base_amount = prelim.base_amount if prelim and prelim.base_amount else estimated_price
 
@@ -284,6 +296,8 @@ def _lookup_notice_bundle(bid_ntce_no: str, bid_ntce_ord: str | None = None) -> 
         a_value_total=a_value_total,
         base_amount=base_amount,
         estimated_price=estimated_price,
+        a_value_source=a_value_source,
+        base_amount_source=base_amount_source,
     )
 
 
@@ -385,6 +399,57 @@ def _build_recommendation_payload(bundle: NoticeBundle) -> dict[str, Any]:
     if table_type == TableType.OUT_OF_SCOPE:
         raise Http404('적격심사 대상 외 공고입니다.')
 
+    # A값/기초금액 공식 확정 여부 판정
+    exact_inputs_ready = (
+        bundle.a_value_source == 'confirmed'
+        and bundle.base_amount_source == 'confirmed'
+    )
+
+    if not exact_inputs_ready:
+        if bundle.a_value_source == 'missing' and bundle.base_amount_source == 'missing':
+            pending_reason = 'both'
+        elif bundle.a_value_source == 'missing':
+            pending_reason = 'a_value'
+        else:
+            pending_reason = 'base_amount'
+
+        return {
+            'notice': {
+                **_serialize_notice_summary(bundle),
+                'noticeNo': bundle.announcement.bid_ntce_no,
+            },
+            'isExact': False,
+            'canRecommend': False,
+            'warningMessage': 'A값 또는 기초금액이 아직 공개되지 않아 정확한 추천이 불가능합니다.',
+            'pendingReason': pending_reason,
+            'warnings': [],
+            'status': {
+                'analysisStatus': 'A값 미확인',
+                'updatedAt': _format_datetime(bundle.announcement.created_at),
+                'reportVersion': '',
+            },
+            'strategies': [],
+            'judgement': {},
+            'similar': {},
+            'floorRate': '-',
+            'floorBid': '-',
+            'band': {},
+            'tableLabel': '',
+            'estimatedPrice': bundle.estimated_price,
+            'aValueTotal': bundle.a_value_total,
+            'baseAmountValue': bundle.base_amount,
+            'floorRateBidValue': 0,
+        }
+
+    # 설명회 advisory warning (hard block 아님)
+    warnings = []
+    if getattr(bundle.announcement, 'briefing_yn', '') == 'Y':
+        warnings.append({
+            'type': 'briefing',
+            'message': '현장설명회 실시 공고입니다. 참가 여부를 확인하세요.',
+            'severity': 'info',
+        })
+
     recommendation = prebid_recommend(
         base_amount=bundle.base_amount,
         a_value=bundle.a_value_total,
@@ -400,6 +465,11 @@ def _build_recommendation_payload(bundle: NoticeBundle) -> dict[str, Any]:
             **_serialize_notice_summary(bundle),
             'noticeNo': bundle.announcement.bid_ntce_no,
         },
+        'isExact': True,
+        'canRecommend': True,
+        'warningMessage': None,
+        'pendingReason': None,
+        'warnings': warnings,
         'strategies': strategies,
         'judgement': {
             'baseAmount': _format_currency(bundle.base_amount),
@@ -570,11 +640,58 @@ def api_price_calculator(request):
         return JsonResponse({'error': '건설공사 적격심사 대상 공고만 지원합니다.'}, status=400)
 
     estimated_price = _parse_int(payload.get('estimatedPrice')) or (bundle.estimated_price if bundle else 0)
-    base_amount = _parse_int(payload.get('baseAmount')) or (bundle.base_amount if bundle else estimated_price)
-    a_value = _parse_int(payload.get('aValue')) or (bundle.a_value_total if bundle else 0)
     bid_rate = _parse_decimal(payload.get('bidRate'), Decimal('0'))
     work_type = _infer_work_type(bundle.announcement if bundle else None, str(payload.get('workType', '')).strip() or None)
     net_cost = _parse_int(payload.get('netConstructionCost'))
+
+    # A값 결정 (4분기 규칙)
+    if 'aValue' in payload and payload['aValue'] not in (None, ''):
+        a_value = _parse_int(payload['aValue'])
+        a_source = 'user_input'
+    elif 'aValue' in payload:
+        # key 존재하지만 null/빈값 — unresolved
+        a_value = 0
+        a_source = 'missing'
+    elif bundle:
+        a_value = bundle.a_value_total
+        a_source = bundle.a_value_source
+    else:
+        a_value = 0
+        a_source = 'missing'
+
+    # 기초금액 결정 (동일 패턴)
+    if 'baseAmount' in payload and payload['baseAmount'] not in (None, ''):
+        base_amount = _parse_int(payload['baseAmount'])
+        base_source = 'user_input'
+    elif 'baseAmount' in payload:
+        base_amount = 0
+        base_source = 'missing'
+    elif bundle:
+        base_amount = bundle.base_amount
+        base_source = bundle.base_amount_source
+    else:
+        base_amount = estimated_price
+        base_source = 'missing'
+
+    # 계산 허용 조건 체크
+    can_calculate = (
+        a_source in ('user_input', 'confirmed')
+        and base_source in ('user_input', 'confirmed')
+    )
+    # HTTP 200 + canRecommend=False: 비즈니스 상태(입력 미확정)이므로 400이 아님.
+    # 프론트엔드는 canRecommend 필드로 분기함.
+    if not can_calculate:
+        pending_parts = []
+        if a_source == 'missing':
+            pending_parts.append('A값')
+        if base_source == 'missing':
+            pending_parts.append('기초금액')
+        return JsonResponse({
+            'isExact': False,
+            'canRecommend': False,
+            'warningMessage': f'{", ".join(pending_parts)}이(가) 아직 확정되지 않아 정확한 계산이 불가능합니다.',
+            'pendingReason': 'both' if len(pending_parts) > 1 else ('a_value' if 'A값' in pending_parts else 'base_amount'),
+        })
 
     if estimated_price <= 0:
         return JsonResponse({'error': '추정가격 또는 공고번호가 필요합니다.'}, status=400)
@@ -607,6 +724,10 @@ def api_price_calculator(request):
         final_pass = final_pass and exclusion.status != ExclusionStatus.EXCLUDED
 
     response = {
+        'isExact': True,
+        'canRecommend': True,
+        'warningMessage': None,
+        'pendingReason': None,
         'form': {
             'noticeNo': bid_ntce_no,
             'baseAmount': str(base_amount),
@@ -650,6 +771,25 @@ def api_ai_report(request):
     else:
         bundle = _lookup_notice_bundle(bid_ntce_no)
     _ensure_supported_bundle(bundle)
+
+    # exact 판정: A값/기초금액 미확정 시 AI 리포트 생성 불가
+    exact_inputs_ready = (
+        bundle.a_value_source == 'confirmed'
+        and bundle.base_amount_source == 'confirmed'
+    )
+    if not exact_inputs_ready:
+        pending_reason = (
+            'both' if bundle.a_value_source == 'missing' and bundle.base_amount_source == 'missing'
+            else ('a_value' if bundle.a_value_source == 'missing' else 'base_amount')
+        )
+        return JsonResponse({
+            'isExact': False,
+            'canRecommend': False,
+            'warningMessage': 'A값 또는 기초금액이 아직 공개되지 않아 AI 리포트를 생성할 수 없습니다.',
+            'pendingReason': pending_reason,
+            'warnings': [],
+        })
+
     recommendation_payload = _build_recommendation_payload(bundle)
     similar_stats = get_similar_bid_stats(bundle.estimated_price)
     table_type = select_table(bundle.estimated_price, _infer_work_type(bundle.announcement))
@@ -706,6 +846,8 @@ def api_history(request):
         try:
             bundle = _lookup_notice_bundle(announcement.bid_ntce_no, announcement.bid_ntce_ord)
             payload = _build_recommendation_payload(bundle)
+            # NOTE: exact_inputs_ready=False인 공고는 strategies가 빈 리스트이므로
+            # next() → StopIteration → except에서 제외됨 (의도된 동작)
             strategy = next(item for item in payload['strategies'] if item['key'] == 'base')
         except Exception:
             continue

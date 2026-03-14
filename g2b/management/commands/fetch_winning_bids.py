@@ -10,7 +10,9 @@ BidAnnouncement DB를 우선 조회한 뒤 누락건만 API로 보충합니다.
 
 from __future__ import annotations
 
+import json
 from datetime import timedelta
+from pathlib import Path
 
 from django.core.management.base import BaseCommand
 from django.db import transaction
@@ -25,7 +27,11 @@ from g2b.services.g2b_construction_sync import (
     bulk_upsert,
     map_successful_bid_to_result,
     ntce_key,
+    resolve_server_filters,
 )
+
+
+RAW_WINNING_BIDS_DIR = Path(__file__).resolve().parents[3] / "data" / "collected" / "api_raw" / "winning_bids"
 
 
 class Command(BaseCommand):
@@ -35,11 +41,15 @@ class Command(BaseCommand):
         parser.add_argument('--days', type=int, default=3, help='최근 N일 조회 (기본 3)')
         parser.add_argument('--limit', type=int, default=0, help='최대 수집 건수')
         parser.add_argument('--dry-run', action='store_true', help='DB 적재 없이 검증만')
+        parser.add_argument('--no-server-filter', action='store_true', help='서버사이드 필터 비활성화 (디버깅용)')
 
     def handle(self, *args, **options):
         days = max(options['days'], 1)
         limit = options['limit'] or None
         dry_run = options['dry_run']
+        no_server_filter = options['no_server_filter']
+
+        server_filters = resolve_server_filters(no_server_filter, self.stdout)
 
         now = timezone.localtime()
         start = now - timedelta(days=days)
@@ -52,10 +62,18 @@ class Command(BaseCommand):
             start_datetime=start_datetime,
             end_datetime=end_datetime,
             limit=limit,
+            server_filters=server_filters,
             callback=lambda page_no, fetched, total: self.stdout.write(
                 f'  낙찰 page {page_no}: {fetched}/{total}'
             ),
         )
+
+        start_key = start_datetime[:8]
+        end_key = end_datetime[:8]
+        RAW_WINNING_BIDS_DIR.mkdir(parents=True, exist_ok=True)
+        raw_path = RAW_WINNING_BIDS_DIR / f"winning_bids_{start_key}_{end_key}.json"
+        raw_path.write_text(json.dumps(result_items, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.stdout.write(f'  JSON 원본 저장: {raw_path}')
 
         if not result_items:
             self.stdout.write('  낙찰 결과 없음')
@@ -89,6 +107,9 @@ class Command(BaseCommand):
                     f'  공고 page {page_no}: {fetched}/{total}'
                 ),
             )
+            enrichment_path = RAW_WINNING_BIDS_DIR / f"notices_enrichment_{start_key}_{end_key}.json"
+            enrichment_path.write_text(json.dumps(api_notice_items, ensure_ascii=False, indent=2), encoding="utf-8")
+            self.stdout.write(f'  JSON 원본 저장: {enrichment_path}')
             for item in api_notice_items:
                 key = ntce_key(item)
                 if key in missing_keys:

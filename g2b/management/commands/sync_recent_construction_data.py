@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+from django.conf import settings
 from django.core.management.base import BaseCommand
 from django.db import transaction
 from django.utils import timezone
@@ -94,6 +95,7 @@ class Command(BaseCommand):
             start_datetime=start_datetime,
             end_datetime=end_datetime,
             limit=notice_limit,
+            server_filters=settings.G2B_SERVER_FILTERS['notice'],
             callback=lambda page_no, fetched, total: self.stdout.write(
                 f'  공고 page {page_no}: {fetched}/{total}'
             ),
@@ -115,6 +117,7 @@ class Command(BaseCommand):
                 start_datetime=start_datetime,
                 end_datetime=end_datetime,
                 limit=result_limit,
+                server_filters=settings.G2B_SERVER_FILTERS['notice'],
                 callback=lambda page_no, fetched, total: self.stdout.write(
                     f'  낙찰 page {page_no}: {fetched}/{total}'
                 ),

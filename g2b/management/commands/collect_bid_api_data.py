@@ -31,7 +31,11 @@ from pathlib import Path
 import httpx
 from django.core.management.base import BaseCommand
 
+from django.conf import settings
+from django.db.models import Exists, OuterRef
+
 from g2b.models import (
+    BidAnnouncement,
     BidApiAValue,
     BidApiCollectionLog,
     BidApiPrelimPrice,
@@ -241,6 +245,10 @@ class Command(BaseCommand):
             "--min-bidders", type=int, default=0,
             help="최소 입찰자 수 필터 (기본 0)",
         )
+        parser.add_argument(
+            "--no-industry-filter", action="store_true",
+            help="업종 필터 미적용 (전 업종 대상, 기존 동작 복원)",
+        )
 
     def handle(self, *args, **options):
         # BC-36: PID lockfile 중복 실행 방지
@@ -269,11 +277,13 @@ class Command(BaseCommand):
         max_price = options["max_price"]
         order = options["order"]
         min_bidders = options["min_bidders"]
+        no_industry_filter = options["no_industry_filter"]
 
         # 1. 대상 공고 추출
         self.stdout.write("BidResult에서 대상 공고 추출 중...")
         targets = self._extract_targets(
             limit, force, min_price, max_price, order, min_bidders,
+            no_industry_filter=no_industry_filter,
         )
         self.stdout.write(f"  수집 대상: {len(targets)}건")
 
@@ -295,9 +305,13 @@ class Command(BaseCommand):
         self, limit: int, force: bool,
         min_price: int, max_price: int,
         order: str = "desc", min_bidders: int = 0,
+        no_industry_filter: bool = False,
     ) -> list[tuple[str, str]]:
         """BidResult에서 적격심사 건설 <100억 고유 공고를 추출한다."""
         from django.db.models import Count
+
+        # 업종 필터 값 결정: settings.G2B_SERVER_FILTERS 직접 접근
+        industry_keyword = settings.G2B_SERVER_FILTERS['notice'].get('indstrytyNm', '')
 
         qs = (
             BidResult.objects
@@ -311,6 +325,18 @@ class Command(BaseCommand):
             .annotate(bidder_cnt=Count("id"))
         )
 
+        # 업종 필터: Exists 서브쿼리로 1M+32M 순차스캔 방지
+        if not no_industry_filter and industry_keyword:
+            ann_sq = BidAnnouncement.objects.filter(
+                bid_ntce_no=OuterRef("bid_ntce_no"),
+                bid_ntce_ord=OuterRef("bid_ntce_ord"),
+                license_limit_list__icontains=industry_keyword,
+            )
+            qs = qs.filter(Exists(ann_sq))
+            self.stdout.write(f"  업종 필터: {industry_keyword}")
+        else:
+            self.stdout.write("  업종 필터: 미적용 (전 업종)")
+
         if min_bidders > 0:
             qs = qs.filter(bidder_cnt__gte=min_bidders)
 
@@ -322,8 +348,17 @@ class Command(BaseCommand):
             qs = qs.order_by("-bid_ntce_no")
 
         if not force:
+            # BC-정합성: 완료 = (a_value_status='ok' AND prelim_status='ok')
+            #             또는 비대상확정 = a_value_status='empty' AND prelim_status IN ('ok','empty')
+            # error/pending 또는 partial success는 재시도 대상에 포함
+            from django.db.models import Q
+            complete_condition = (
+                Q(a_value_status="ok", prelim_status="ok")
+                | Q(a_value_status="empty", prelim_status__in=["ok", "empty"])
+            )
             collected = set(
                 BidApiCollectionLog.objects
+                .filter(complete_condition)
                 .values_list("bid_ntce_no", "bid_ntce_ord")
                 .distinct()
             )
@@ -464,7 +499,11 @@ class Command(BaseCommand):
         ntce_ord: str,
         log: BidApiCollectionLog,
     ) -> str:
-        """A값 API 수집. JSON 원본 저장 → DB 적재."""
+        """A값 API 수집. JSON 원본 저장 → DB 적재.
+
+        bidNtceOrd가 있으면 params에 포함하고, 응답 items 중 차수가 일치하는
+        row만 저장한다. 재공고/차수 변경 시 엉뚱한 ord의 A값이 붙는 것을 방지.
+        """
         params = {
             "ServiceKey": api_key,
             "type": "json",
@@ -473,6 +512,10 @@ class Command(BaseCommand):
             "inqryDiv": "2",
             "bidNtceNo": ntce_no,
         }
+        # BC-정합성: 차수가 있으면 API params에 포함 (서버측 필터)
+        if ntce_ord:
+            params["bidNtceOrd"] = ntce_ord
+
         data = call_api(
             client, BID_INFO_BASE,
             "getBidPblancListBidPrceCalclAInfo", params,
@@ -490,12 +533,27 @@ class Command(BaseCommand):
             log.save(update_fields=["a_value_status", "updated_at"])
             return "empty"
 
+        # BC-정합성: 차수가 있으면 응답 items 중 일치하는 row만 사용
+        if ntce_ord:
+            matched = [
+                it for it in items
+                if (it.get("bidNtceOrd") or "") == ntce_ord
+            ]
+            if not matched:
+                # 일치 row 없음 → 비대상(차수 불일치) 처리
+                log.a_value_status = "empty"
+                log.error_detail += f"A값: ord mismatch (응답차수={[it.get('bidNtceOrd') for it in items]}, 기대={ntce_ord})\n"
+                log.save(update_fields=["a_value_status", "error_detail", "updated_at"])
+                return "empty"
+            item = matched[0]
+        else:
+            item = items[0]
+
         # JSON 원본 저장
-        actual_ord = ntce_ord or items[0].get("bidNtceOrd", "") or "000"
+        actual_ord = ntce_ord or item.get("bidNtceOrd", "") or "000"
         self._save_raw_json(RAW_A_VALUE_DIR, ntce_no, actual_ord, data)
 
-        # 첫 번째 아이템에서 A값 추출 → DB 적재
-        item = items[0]
+        # A값 추출 → DB 적재
         model_fields = {}
         for api_field, model_field in A_VALUE_API_TO_MODEL.items():
             model_fields[model_field] = parse_api_int(item.get(api_field))

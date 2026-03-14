@@ -32,4 +32,4 @@ RUN mkdir -p /app/static/frontend && \
 
 EXPOSE 8010
 
-CMD ["sh", "-c", "mkdir -p /app/static/frontend && cp -r /opt/frontend-dist/. /app/static/frontend/ && python manage.py collectstatic --noinput 2>/dev/null || true && python manage.py runserver 0.0.0.0:8010"]
+CMD ["sh", "-c", "mkdir -p /app/static/frontend && cp -r /opt/frontend-dist/. /app/static/frontend/ && python manage.py collectstatic --noinput 2>/dev/null || true && python manage.py migrate --noinput && python manage.py runserver 0.0.0.0:8010"]

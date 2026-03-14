@@ -20,10 +20,12 @@ Rule-based bidding analysis engine for Korea's G2B public procurement system.
 ## Tech Stack
 
 - Python 3.10
-- Django 5.0 (backend)
+- Django 6.0 (backend)
 - PostgreSQL 15 (database)
+- React 18 + TypeScript + Vite (frontend)
+- Docker Compose (deployment)
 - LangGraph (Phase 2 계획)
-- Package manager: pip (pyproject.toml)
+- Package manager: uv (pyproject.toml)
 
 ## Key Domain Rules
 
@@ -39,14 +41,18 @@ Rule-based bidding analysis engine for Korea's G2B public procurement system.
 bidcompass/
 ├── config/              # Django settings, urls, wsgi
 ├── g2b/                 # Main app (models, views, services, commands)
-│   ├── services/        # bid_engine.py, optimal_bid.py, g2b_client.py
-│   ├── management/commands/  # 21 management commands
-│   └── tests.py         # 110 tests (11 SimpleTestCase + 3 TestCase)
-├── templates/g2b/       # 5 templates
-├── static/g2b/          # style.css
-├── scripts/             # pdf_to_markdown.py, test_api.py, test_new_apis.py
+│   ├── services/        # bid_engine.py, optimal_bid.py, g2b_construction_client.py, g2b_construction_sync.py
+│   ├── management/commands/  # 27 management commands
+│   └── tests.py         # 35 test classes, 184+ tests
+├── frontend/            # React 18 + TypeScript + Vite SPA
+│   └── src/bidcompass-ui/  # Pages, components, types
+├── templates/g2b/       # Legacy Django templates (/legacy/ prefix)
+├── static/              # Built frontend assets + CSS
+├── scripts/             # run_all_pipelines.sh, pdf_to_markdown.py
 ├── data/collected/      # API raw JSON, charts, analysis outputs (gitignored)
-└── docs/                # Input xlsx files (local only, gitignored)
+├── docs/                # Input xlsx files, API specs (local only, gitignored)
+├── Dockerfile           # Multi-stage build (Node + Python)
+└── docker-compose.yml   # db + web + scheduler (3 containers)
 ```
 
 ## Conventions

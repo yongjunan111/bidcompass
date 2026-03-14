@@ -34,58 +34,26 @@ services:
       db:
         condition: service_healthy
 
-  scheduler_announcements:
+  scheduler:
     build: .
-    container_name: bidcompass_sched_announcements
+    container_name: bidcompass_scheduler
     restart: unless-stopped
     env_file: .env
     environment:
       DB_HOST: db
       DB_PORT: '5432'
       SYNC_LOOKBACK_DAYS: '2'
+      RESULT_LOOKBACK_DAYS: '3'
       SYNC_INTERVAL_SECONDS: '86400'
-    volumes:
-      - .:/app
-    depends_on:
-      db:
-        condition: service_healthy
-    command: ["sh", "/app/scripts/run_fetch_announcements.sh"]
-
-  scheduler_results:
-    build: .
-    container_name: bidcompass_sched_results
-    restart: unless-stopped
-    env_file: .env
-    environment:
-      DB_HOST: db
-      DB_PORT: '5432'
-      SYNC_LOOKBACK_DAYS: '3'
-      SYNC_INTERVAL_SECONDS: '86400'
-    volumes:
-      - .:/app
-    depends_on:
-      db:
-        condition: service_healthy
-    command: ["sh", "/app/scripts/run_fetch_results.sh"]
-
-  scheduler_api_data:
-    build: .
-    container_name: bidcompass_sched_api_data
-    restart: unless-stopped
-    env_file: .env
-    environment:
-      DB_HOST: db
-      DB_PORT: '5432'
       API_DATA_LIMIT: '1000'
       API_DAILY_LIMIT: '900'
-      API_SYNC_INTERVAL_SECONDS: '86400'
     volumes:
       - .:/app
       - ./data/collected:/app/data/collected
     depends_on:
       db:
         condition: service_healthy
-    command: ["sh", "/app/scripts/run_collect_api_data.sh"]
+    command: ["sh", "/app/scripts/run_all_pipelines.sh"]
 
 volumes:
   bidcompass_pgdata:
