@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import logging
 from decimal import Decimal, InvalidOperation
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 SUPPORTED_PRESUME_PRICE_LIMIT = 10_000_000_000
 PLACEHOLDER_CONTRACT_NO = 'NOTICE'
@@ -24,6 +27,11 @@ def parse_decimal(value: Any) -> Decimal | None:
         return Decimal(str(value).replace(',', '').strip())
     except (InvalidOperation, TypeError, ValueError):
         return None
+
+
+def _trunc(value: str, max_len: int) -> str:
+    """매핑 시점 truncate. bulk_upsert의 _auto_truncate와 이중 적용되나 멱등."""
+    return value[:max_len] if len(value) > max_len else value
 
 
 def compact_date(value: Any) -> str:
@@ -60,11 +68,15 @@ def ntce_key(item: dict[str, Any]) -> tuple[str, str]:
 def is_eligible_notice_for_service(item: dict[str, Any]) -> bool:
     presume_price = parse_int(item.get('presmptPrce')) or 0
     win_method = str(item.get('sucsfbidMthdNm') or item.get('bidwinrDcsnMthdNm') or '').strip()
-    return (
+    eligible = (
         presume_price > 0
         and presume_price < SUPPORTED_PRESUME_PRICE_LIMIT
         and '적격' in win_method
     )
+    if eligible and '적격심사' not in win_method:
+        bid_ntce_no = item.get('bidNtceNo', '')
+        logger.warning('비표준 적격심사: %s [%s]', win_method, bid_ntce_no)
+    return eligible
 
 
 def is_upcoming_notice(item: dict[str, Any], now_key: str) -> bool:
@@ -84,10 +96,10 @@ def map_notice_to_announcement(item: dict[str, Any]) -> dict[str, Any]:
         'openg_plce_nm': item.get('opengPlce', '') or '',
         'bid_ntce_nm': item.get('bidNtceNm', '') or '',
         'first_ntce_yn': 'N' if str(item.get('reNtceYn', '')).strip() == 'Y' else 'Y',
-        'ntce_status': item.get('ntceKindNm', '') or item.get('bidNtceSttusNm', '') or '',
+        'ntce_status': _trunc(item.get('ntceKindNm', '') or item.get('bidNtceSttusNm', '') or '', 40),
         'site_area': item.get('cnstrtsiteRgnNm', '') or '',
-        'order_plan_no': item.get('orderPlanUntyNo', '') or '',
-        'pre_spec_reg_no': item.get('bfSpecRgstNo', '') or '',
+        'order_plan_no': _trunc(item.get('orderPlanUntyNo', '') or '', 40),
+        'pre_spec_reg_no': _trunc(item.get('bfSpecRgstNo', '') or '', 40),
         'restrict_area_list': join_texts(
             item.get('cnstrtsiteRgnNm'),
             item.get('prtcptPsblRgnNm'),
@@ -96,8 +108,8 @@ def map_notice_to_announcement(item: dict[str, Any]) -> dict[str, Any]:
         'license_limit_list': build_license_limit_list(item),
         'bid_method_no': item.get('sucsfbidMthdCd', '') or '',
         'explain_plce_nm': item.get('dcmtgOprtnPlce', '') or '',
-        'ntce_person': item.get('ntceInsttOfclNm', '') or '',
-        'ntce_person_tel': item.get('ntceInsttOfclTelNo', '') or '',
+        'ntce_person': _trunc(item.get('ntceInsttOfclNm', '') or '', 40),
+        'ntce_person_tel': _trunc(item.get('ntceInsttOfclTelNo', '') or '', 40),
         'ntce_dept': item.get('ntceInsttNm', '') or '',
         'presume_price': parse_int(item.get('presmptPrce')),
         'budget_amt': parse_int(item.get('bdgtAmt')),
@@ -108,12 +120,19 @@ def map_notice_to_announcement(item: dict[str, Any]) -> dict[str, Any]:
         'main_work_price': parse_int(item.get('mainCnsttyPresmptPrce'))
         or parse_int(item.get('mainCnsttyCnstwkPrearngAmt')),
         'project_amt': parse_int(item.get('bdgtAmt')),
+        'briefing_yn': _trunc(item.get('presnatnOprtnYn', '') or '', 1),
+        'briefing_date': _trunc(item.get('presnatnOprtnDate', '') or '', 8),
+        'briefing_time': _trunc(item.get('presnatnOprtnTm', '') or '', 4),
+        'industry_limit_yn': _trunc(item.get('indstrytyLmtYn', '') or '', 1),
+        'region_limit_yn': _trunc(item.get('rgnLmtYn', '') or '', 1),
+        'reserve_price_method': _trunc(item.get('rsrvtnPrceDcsnMthdNm', '') or '', 40),
+        'bid_ntce_url': _trunc(item.get('bidNtceUrl', '') or '', 500),
     }
 
 
 def map_notice_to_contract(item: dict[str, Any]) -> dict[str, Any]:
     return {
-        'procurement_method': item.get('cntrctCnclsMthdNm', '') or '',
+        'procurement_method': _trunc(item.get('cntrctCnclsMthdNm', '') or '', 40),
         'procurement_type': '공사',
         'bid_ntce_no': item.get('bidNtceNo', '') or '',
         'bid_ntce_ord': item.get('bidNtceOrd', '') or '',
@@ -124,20 +143,20 @@ def map_notice_to_contract(item: dict[str, Any]) -> dict[str, Any]:
         'demand_org': item.get('dminsttNm', '') or '',
         'demand_org_cd': item.get('dminsttCd', '') or '',
         'openg_date': compact_date(item.get('opengDt')),
-        'bid_method': item.get('bidMethdNm', '') or '',
-        'win_method': item.get('sucsfbidMthdNm', '') or item.get('bidwinrDcsnMthdNm', '') or '',
-        'std_contract_method': item.get('cntrctCnclsMthdNm', '') or '',
+        'bid_method': _trunc(item.get('bidMethdNm', '') or '', 40),
+        'win_method': _trunc(item.get('sucsfbidMthdNm', '') or item.get('bidwinrDcsnMthdNm', '') or '', 40),
+        'std_contract_method': _trunc(item.get('cntrctCnclsMthdNm', '') or '', 40),
         'license_limit_list': build_license_limit_list(item),
         'restrict_area_list': join_texts(
             item.get('cnstrtsiteRgnNm'),
             item.get('prtcptPsblRgnNm'),
             item.get('rgnLmtBidLocplcJdgmBssNm'),
         ),
-        'contract_type': item.get('cntrctCnclsSttusNm', '') or '',
+        'contract_type': _trunc(item.get('cntrctCnclsSttusNm', '') or '', 40),
         'contract_no': PLACEHOLDER_CONTRACT_NO,
         'base_date': compact_date(item.get('rgstDt')),
-        'cntrct_req_no': item.get('untyNtceNo', '') or '',
-        'order_plan_no': item.get('orderPlanUntyNo', '') or '',
+        'cntrct_req_no': _trunc(item.get('untyNtceNo', '') or '', 40),
+        'order_plan_no': _trunc(item.get('orderPlanUntyNo', '') or '', 40),
         'demand_org_area': item.get('cnstrtsiteRgnNm', '') or '',
         'presume_price': parse_int(item.get('presmptPrce')),
     }
@@ -176,7 +195,7 @@ def map_a_value_item(item: dict[str, Any]) -> dict[str, Any]:
         'occupational_safety': parse_int(item.get('sftyMngcst')) or 0,
         'safety_management': parse_int(item.get('sftyChckMngcst')) or 0,
         'quality_management': parse_int(item.get('qltyMngcst')) or 0,
-        'price_decision_method': item.get('prearngPrceDcsnMthdNm', '') or '',
+        'price_decision_method': _trunc(item.get('prearngPrceDcsnMthdNm', '') or '', 40),
     }
 
 
@@ -206,9 +225,42 @@ def map_base_amount_to_placeholder_prelim(item: dict[str, Any]) -> dict[str, Any
     }
 
 
+def resolve_server_filters(no_server_filter: bool, stdout) -> 'dict[str, str] | None':
+    """서버사이드 필터를 결정하고 로그를 출력한다."""
+    from django.conf import settings
+    notice_filter = settings.G2B_SERVER_FILTERS['notice']
+    if no_server_filter:
+        stdout.write('서버필터: 비활성화 (--no-server-filter)')
+        return None
+    active = {k: v for k, v in notice_filter.items() if v}
+    if active:
+        stdout.write(f'서버필터: {active}')
+    else:
+        stdout.write('서버필터: 없음 (환경변수 미설정)')
+    return notice_filter
+
+
+def _auto_truncate(model, rows: list[dict]) -> list[dict]:
+    """모델 CharField max_length에 맞춰 자동 truncate (in-place 변경)."""
+    limits = {}
+    for field in model._meta.fields:
+        if hasattr(field, 'max_length') and field.max_length:
+            limits[field.name] = field.max_length
+    if not limits:
+        return rows
+    for row in rows:
+        for fname, maxlen in limits.items():
+            val = row.get(fname)
+            if isinstance(val, str) and len(val) > maxlen:
+                row[fname] = val[:maxlen]
+    return rows
+
+
 def bulk_upsert(model, rows: list[dict], *, unique_fields: list[str]) -> tuple[int, int]:
     if not rows:
         return 0, 0
+
+    rows = _auto_truncate(model, rows)
 
     # Deduplicate within batch by unique_fields
     seen_keys: dict[tuple, int] = {}
@@ -244,7 +296,7 @@ def bulk_upsert(model, rows: list[dict], *, unique_fields: list[str]) -> tuple[i
 
 def map_contract_item_to_bid_contract(item: dict[str, Any]) -> dict[str, Any]:
     return {
-        'procurement_method': item.get('cntrctMthdNm', '') or '',
+        'procurement_method': _trunc(item.get('cntrctMthdNm', '') or '', 40),
         'procurement_type': '공사',
         'bid_ntce_no': item.get('bidNtceNo', '') or '',
         'bid_ntce_ord': item.get('bidNtceOrd', '') or '',
@@ -255,11 +307,11 @@ def map_contract_item_to_bid_contract(item: dict[str, Any]) -> dict[str, Any]:
         'demand_org': item.get('dmndInsttNm', '') or '',
         'demand_org_cd': item.get('dmndInsttCd', '') or '',
         'openg_date': compact_date(item.get('opengDate')),
-        'bid_method': item.get('bidMethdNm', '') or '',
-        'win_method': item.get('sucsfbidMthdNm', '') or '',
-        'std_contract_method': item.get('cntrctCnclsMthdNm', '') or '',
-        'contract_type': item.get('cntrctCnclsSttusNm', '') or '',
-        'contract_no': item.get('cntrctNo', '') or '',
+        'bid_method': _trunc(item.get('bidMethdNm', '') or '', 40),
+        'win_method': _trunc(item.get('sucsfbidMthdNm', '') or '', 40),
+        'std_contract_method': _trunc(item.get('cntrctCnclsMthdNm', '') or '', 40),
+        'contract_type': _trunc(item.get('cntrctCnclsSttusNm', '') or '', 40),
+        'contract_no': _trunc(item.get('cntrctNo', '') or '', 40),
         'base_date': compact_date(item.get('cntrctCnclsDate')),
         'company_nm': item.get('rprsntCorpNm', '') or '',
         'company_bizno': item.get('rprsntCorpBizrno', '') or '',

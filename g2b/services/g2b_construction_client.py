@@ -109,7 +109,9 @@ def fetch_construction_notices(
     end_datetime: str,
     limit: int | None = None,
     callback=None,
+    server_filters: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
+    extra = {k: v for k, v in (server_filters or {}).items() if v}
     return fetch_paged_items(
         base_url=BID_INFO_BASE,
         operation='getBidPblancListInfoCnstwkPPSSrch',
@@ -117,6 +119,7 @@ def fetch_construction_notices(
             'inqryDiv': '1',
             'inqryBgnDt': start_datetime,
             'inqryEndDt': end_datetime,
+            **extra,
         },
         limit=limit,
         callback=callback,
@@ -129,7 +132,9 @@ def fetch_construction_successful_bids(
     end_datetime: str,
     limit: int | None = None,
     callback=None,
+    server_filters: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
+    extra = {k: v for k, v in (server_filters or {}).items() if v}
     return fetch_paged_items(
         base_url=AWARD_INFO_BASE,
         operation='getScsbidListSttusCnstwkPPSSrch',
@@ -137,44 +142,92 @@ def fetch_construction_successful_bids(
             'inqryDiv': '1',
             'inqryBgnDt': start_datetime,
             'inqryEndDt': end_datetime,
+            **extra,
         },
         limit=limit,
         callback=callback,
     )
 
 
-def fetch_construction_a_value(bid_ntce_no: str) -> dict[str, Any] | None:
+def fetch_construction_notices_by_no(
+    bid_ntce_no: str,
+    bid_ntce_ord: str = '',
+) -> list[dict[str, Any]]:
+    """공고번호 지정 조회 (inqryDiv=2). Pipeline 2b 자가복구용.
+
+    BidAnnouncement에 없는 공고를 공고번호로 보조 조회할 때 사용한다.
+    서버사이드 필터(업종/지역/금액)는 적용하지 않는다.
+    """
+    params: dict[str, Any] = {
+        'inqryDiv': '2',
+        'bidNtceNo': bid_ntce_no,
+        'numOfRows': 10,
+        'pageNo': 1,
+    }
+    if bid_ntce_ord:
+        params['bidNtceOrd'] = bid_ntce_ord
+    with httpx.Client(timeout=30.0) as client:
+        data = request_json(
+            base_url=BID_INFO_BASE,
+            operation='getBidPblancListInfoCnstwkPPSSrch',
+            params=params,
+            client=client,
+        )
+    return extract_items(data)
+
+
+def fetch_construction_a_value(bid_ntce_no: str, bid_ntce_ord: str = '') -> dict[str, Any] | None:
+    params: dict[str, Any] = {
+        'inqryDiv': '2',
+        'bidNtceNo': bid_ntce_no,
+        'numOfRows': 5,
+        'pageNo': 1,
+    }
+    if bid_ntce_ord:
+        params['bidNtceOrd'] = bid_ntce_ord
     with httpx.Client(timeout=30.0) as client:
         data = request_json(
             base_url=BID_INFO_BASE,
             operation='getBidPblancListBidPrceCalclAInfo',
-            params={
-                'inqryDiv': '2',
-                'bidNtceNo': bid_ntce_no,
-                'numOfRows': 5,
-                'pageNo': 1,
-            },
+            params=params,
             client=client,
         )
     items = extract_items(data)
-    return items[0] if items else None
+    if not items:
+        return None
+    if bid_ntce_ord:
+        for item in items:
+            if item.get('bidNtceOrd', '') == bid_ntce_ord:
+                return item
+        return None
+    return items[0]
 
 
-def fetch_construction_base_amount(bid_ntce_no: str) -> dict[str, Any] | None:
+def fetch_construction_base_amount(bid_ntce_no: str, bid_ntce_ord: str = '') -> dict[str, Any] | None:
+    params: dict[str, Any] = {
+        'inqryDiv': '2',
+        'bidNtceNo': bid_ntce_no,
+        'numOfRows': 5,
+        'pageNo': 1,
+    }
+    if bid_ntce_ord:
+        params['bidNtceOrd'] = bid_ntce_ord
     with httpx.Client(timeout=30.0) as client:
         data = request_json(
             base_url=BID_INFO_BASE,
             operation='getBidPblancListInfoCnstwkBsisAmount',
-            params={
-                'inqryDiv': '2',
-                'bidNtceNo': bid_ntce_no,
-                'numOfRows': 5,
-                'pageNo': 1,
-            },
+            params=params,
             client=client,
         )
     items = extract_items(data)
-    return items[0] if items else None
+    if not items:
+        return None
+    if bid_ntce_ord:
+        for item in items:
+            if item.get('bidNtceOrd', '') == bid_ntce_ord:
+                return item
+        return None
+    return items[0]
 
 
 def fetch_construction_prelim_prices(

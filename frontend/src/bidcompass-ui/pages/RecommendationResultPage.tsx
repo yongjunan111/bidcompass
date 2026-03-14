@@ -164,27 +164,44 @@ export function RecommendationResultPage(): JSX.Element {
         </button>
       </form>
 
-      <StatusBanner
-        tone={error ? 'error' : loading ? 'default' : data?.judgement.passResult.includes('PASS') ? 'success' : 'warning'}
-        label={
-          error
-            ? '오류'
-            : loading
-              ? '분석 중'
-              : data?.judgement.passResult.includes('PASS')
-                ? '분석 완료'
-                : '재검토'
-        }
-        text={
-          error
-            ? error
-            : loading
-              ? '추천 결과를 불러오는 중입니다.'
-              : '추천안을 선택하면 주요 계산값과 요약이 함께 바뀝니다.'
-        }
-      />
+      {data?.warnings?.map((w) => (
+        <StatusBanner
+          key={w.type}
+          tone={w.severity === 'error' ? 'error' : w.severity === 'warning' ? 'warning' : 'default'}
+          label={w.severity === 'info' ? '안내' : '주의'}
+          text={w.message}
+        />
+      ))}
 
-      {data?.strategies.length ? (
+      {data && !data.canRecommend ? (
+        <StatusBanner
+          tone="warning"
+          label="추천 불가"
+          text={data.warningMessage ?? 'A값 또는 기초금액이 아직 공개되지 않아 정확한 추천이 불가능합니다.'}
+        />
+      ) : (
+        <StatusBanner
+          tone={error ? 'error' : loading ? 'default' : data?.judgement.passResult.includes('PASS') ? 'success' : 'warning'}
+          label={
+            error
+              ? '오류'
+              : loading
+                ? '분석 중'
+                : data?.judgement.passResult.includes('PASS')
+                  ? '분석 완료'
+                  : '재검토'
+          }
+          text={
+            error
+              ? error
+              : loading
+                ? '추천 결과를 불러오는 중입니다.'
+                : '추천안을 선택하면 주요 계산값과 요약이 함께 바뀝니다.'
+          }
+        />
+      )}
+
+      {data && !data.canRecommend ? null : data?.strategies.length ? (
         <StrategyGroup
           items={data.strategies}
           selectedKey={selectedKey}
@@ -203,7 +220,11 @@ export function RecommendationResultPage(): JSX.Element {
               <div className="bc-state-card">조회할 공고번호를 입력해 주세요.</div>
             ) : null}
 
-            {data ? (
+            {data && !data.canRecommend ? (
+              <div className="bc-state-card bc-state-pending">
+                {data.warningMessage ?? 'A값 또는 기초금액이 아직 공개되지 않아 정확한 추천이 불가능합니다.'}
+              </div>
+            ) : data ? (
               <>
                 <div className="bc-score-grid">
                   <article className="bc-score-card">

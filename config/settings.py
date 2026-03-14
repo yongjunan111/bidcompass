@@ -132,3 +132,11 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # OpenAI (BC-53: AI 전략 리포트)
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
 OPENAI_MODEL = os.getenv('OPENAI_MODEL', 'gpt-4o-mini')
+
+# G2B API 서버사이드 필터 (파일럿: 건축공사업)
+G2B_SERVER_FILTERS = {
+    'notice': {
+        'indstrytyNm': os.getenv('G2B_FILTER_INDUSTRY', ''),
+        'intrntnlDivCd': os.getenv('G2B_FILTER_INTL_DIV', ''),
+    },
+}

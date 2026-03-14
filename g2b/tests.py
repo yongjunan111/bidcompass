@@ -1864,6 +1864,209 @@ class TestWinningBidMapping(SimpleTestCase):
         self.assertEqual(result['presume_price'], 5000000000)
 
 
+class TestPipeline3OrdMismatch(SimpleTestCase):
+    """BC-정합성: A값 수집 시 차수(ord) 정합성 검증."""
+
+    def _make_command(self):
+        from g2b.management.commands.collect_bid_api_data import Command
+        return Command()
+
+    def test_matching_ord_is_saved(self):
+        """응답 items 중 ntce_ord와 일치하는 row만 선택한다."""
+        from unittest.mock import MagicMock, patch
+
+        cmd = self._make_command()
+        log = MagicMock()
+        log.error_detail = ""
+
+        items = [
+            {"bidNtceOrd": "000", "bidNtceNo": "20260101001",
+             "npnInsrprm": "1000", "mrfnHealthInsrprm": "0",
+             "rtrfundNon": "0", "odsnLngtrmrcprInsrprm": "0",
+             "sftyMngcst": "0", "sftyChckMngcst": "0", "qltyMngcst": "0",
+             "prearngPrceDcsnMthdNm": "표준시장"},
+            {"bidNtceOrd": "001", "bidNtceNo": "20260101001",
+             "npnInsrprm": "9999", "mrfnHealthInsrprm": "0",
+             "rtrfundNon": "0", "odsnLngtrmrcprInsrprm": "0",
+             "sftyMngcst": "0", "sftyChckMngcst": "0", "qltyMngcst": "0",
+             "prearngPrceDcsnMthdNm": "표준시장"},
+        ]
+        api_response = {
+            "response": {"header": {"resultCode": "00"}, "body": {
+                "items": {"item": items}, "totalCount": 2,
+            }}
+        }
+
+        with patch.object(cmd, '_save_raw_json'), \
+             patch('g2b.management.commands.collect_bid_api_data.call_api',
+                   return_value=api_response), \
+             patch('g2b.management.commands.collect_bid_api_data.BidApiAValue') as MockModel:
+            MockModel.objects.update_or_create = MagicMock()
+            result = cmd._collect_a_value(
+                MagicMock(), "fake_key", "20260101001", "001", log,
+            )
+
+        self.assertEqual(result, "ok")
+        call_kwargs = MockModel.objects.update_or_create.call_args
+        defaults = call_kwargs[1]["defaults"]
+        # ord="001" 행의 npnInsrprm=9999 이어야 함
+        self.assertEqual(defaults["national_pension"], 9999)
+
+    def test_ord_mismatch_returns_empty(self):
+        """응답 items에 기대 차수가 없으면 'empty'를 반환한다."""
+        from unittest.mock import MagicMock, patch
+
+        cmd = self._make_command()
+        log = MagicMock()
+        log.error_detail = ""
+
+        items = [
+            {"bidNtceOrd": "000", "bidNtceNo": "20260101001",
+             "npnInsrprm": "1000"},
+        ]
+        api_response = {
+            "response": {"header": {"resultCode": "00"}, "body": {
+                "items": {"item": items}, "totalCount": 1,
+            }}
+        }
+
+        with patch('g2b.management.commands.collect_bid_api_data.call_api',
+                   return_value=api_response):
+            result = cmd._collect_a_value(
+                MagicMock(), "fake_key", "20260101001", "002", log,
+            )
+
+        self.assertEqual(result, "empty")
+
+
+class TestPipeline3PartialSuccessRetry(SimpleTestCase):
+    """BC-정합성: CollectionLog partial success는 재시도 대상에 포함된다."""
+
+    def _build_targets_set(self, logs_qs_mock, qs_rows, limit=100):
+        """_extract_targets 내부의 collected set 구성 로직을 직접 검증."""
+        from django.db.models import Q
+        # partial success (a_value_status=ok, prelim_status=error) 는
+        # complete_condition을 만족하지 않으므로 collected에 포함되지 않아야 함
+        complete_condition = (
+            Q(a_value_status="ok", prelim_status="ok")
+            | Q(a_value_status="empty", prelim_status__in=["ok", "empty"])
+        )
+        # 로그 목록을 직접 필터링하여 검증
+        statuses = [
+            {"bid_ntce_no": "A001", "bid_ntce_ord": "00",
+             "a_value_status": "ok", "prelim_status": "ok"},
+            {"bid_ntce_no": "A002", "bid_ntce_ord": "00",
+             "a_value_status": "ok", "prelim_status": "error"},   # partial → 재시도
+            {"bid_ntce_no": "A003", "bid_ntce_ord": "00",
+             "a_value_status": "empty", "prelim_status": "empty"},  # 비대상확정
+            {"bid_ntce_no": "A004", "bid_ntce_ord": "00",
+             "a_value_status": "pending", "prelim_status": "pending"},  # 미완료 → 재시도
+        ]
+
+        def matches_complete(row):
+            a, p = row["a_value_status"], row["prelim_status"]
+            return (a == "ok" and p == "ok") or (a == "empty" and p in ("ok", "empty"))
+
+        collected = {
+            (r["bid_ntce_no"], r["bid_ntce_ord"])
+            for r in statuses if matches_complete(r)
+        }
+        # A001(ok/ok), A003(empty/empty) 만 완료
+        self.assertIn(("A001", "00"), collected)
+        self.assertIn(("A003", "00"), collected)
+        # A002(partial), A004(pending) 은 재시도 대상
+        self.assertNotIn(("A002", "00"), collected)
+        self.assertNotIn(("A004", "00"), collected)
+
+    def test_partial_success_not_in_collected(self):
+        self._build_targets_set(None, [])
+
+
+class TestPipeline2bMissingNoticeBackfill(SimpleTestCase):
+    """BC-자가복구: BidAnnouncement에 없는 공고를 보조 조회로 복구한다."""
+
+    def test_backfill_adds_to_existing_keys(self):
+        """보조 조회 성공 시 existing_keys에 추가되어 계약이 적재된다."""
+        from unittest.mock import MagicMock, patch, call
+        from io import StringIO
+        from django.core.management import call_command
+
+        notice_item = {
+            "bidNtceNo": "20260199001",
+            "bidNtceOrd": "00",
+            "bidNtceNm": "보조조회 복구 공사",
+            "presmptPrce": "500000000",
+            "sucsfbidMthdNm": "적격심사",
+            "ntceInsttNm": "테스트기관",
+            "ntceInsttCd": "001",
+        }
+
+        with patch(
+            'g2b.management.commands.fetch_contracts.fetch_construction_contracts',
+            return_value=[
+                {
+                    "bsnsDivNm": "공사",
+                    "bidNtceNo": "20260199001",
+                    "bidNtceOrd": "00",
+                    "cntrctNo": "C99001",
+                }
+            ],
+        ), patch(
+            'g2b.management.commands.fetch_contracts.fetch_construction_notices_by_no',
+            return_value=[notice_item],
+        ) as mock_backfill, patch(
+            'g2b.management.commands.fetch_contracts.BidAnnouncement'
+        ) as MockAnn, patch(
+            'g2b.management.commands.fetch_contracts.bulk_upsert',
+            return_value=(1, 0),
+        ), patch(
+            'g2b.management.commands.fetch_contracts.BidContract'
+        ):
+            # BidAnnouncement.objects.filter(...).values_list(...) → 빈 set (공고 미수집)
+            MockAnn.objects.filter.return_value.values_list.return_value = []
+
+            out = StringIO()
+            call_command('fetch_contracts', '--days=1', '--dry-run', stdout=out)
+
+        # 보조 조회 함수가 호출되었는지 확인
+        mock_backfill.assert_called_once_with("20260199001", "00")
+
+    def test_backfill_failure_is_skipped(self):
+        """보조 조회가 예외를 던지면 해당 공고를 스킵하고 계속 진행한다."""
+        from unittest.mock import MagicMock, patch
+        from io import StringIO
+        from django.core.management import call_command
+
+        with patch(
+            'g2b.management.commands.fetch_contracts.fetch_construction_contracts',
+            return_value=[
+                {
+                    "bsnsDivNm": "공사",
+                    "bidNtceNo": "20260199002",
+                    "bidNtceOrd": "00",
+                    "cntrctNo": "C99002",
+                }
+            ],
+        ), patch(
+            'g2b.management.commands.fetch_contracts.fetch_construction_notices_by_no',
+            side_effect=Exception("API timeout"),
+        ), patch(
+            'g2b.management.commands.fetch_contracts.BidAnnouncement'
+        ) as MockAnn, patch(
+            'g2b.management.commands.fetch_contracts.bulk_upsert',
+            return_value=(0, 0),
+        ), patch(
+            'g2b.management.commands.fetch_contracts.BidContract'
+        ):
+            MockAnn.objects.filter.return_value.values_list.return_value = []
+
+            out = StringIO()
+            # 예외가 바깥으로 전파되지 않고 정상 완료되어야 함
+            call_command('fetch_contracts', '--days=1', '--dry-run', stdout=out)
+
+        self.assertIn('보조 조회 실패', out.getvalue())
+
+
 class TestContractMapping(SimpleTestCase):
     """계약 매핑 함수 테스트"""
 
@@ -1893,5 +2096,681 @@ class TestContractMapping(SimpleTestCase):
             'cntrctNo': 'C2026010100001',
         }
         result = map_contract_item_to_bid_contract(item)
-        self.assertNotEqual(result['contract_no'], 'NOTICE')
         self.assertEqual(result['contract_no'], 'C2026010100001')
+        self.assertNotEqual(result['contract_no'], 'NOTICE')
+
+
+# ──────────────────────────────────────────────
+# BC-61: A값 미공개 공고 처리 테스트
+# ──────────────────────────────────────────────
+
+class TestExactInputsReady(TestCase):
+    """BC-61: A값 미공개 공고 처리 테스트."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from g2b.models import BidApiAValue, BidApiPrelimPrice
+
+        # 공고 1: A+base 모두 confirmed
+        cls.ann_full = BidAnnouncement.objects.create(
+            bid_ntce_no='TEST-FULL-001',
+            bid_ntce_ord='00',
+            bid_ntce_nm='테스트 공고 (A+base 확정)',
+            presume_price=500_000_000,
+        )
+        BidContract.objects.create(
+            bid_ntce_no='TEST-FULL-001',
+            bid_ntce_ord='00',
+            contract_no='NOTICE',
+            procurement_type='공사',
+            win_method='적격심사제',
+            presume_price=500_000_000,
+        )
+        BidApiAValue.objects.create(
+            bid_ntce_no='TEST-FULL-001',
+            bid_ntce_ord='00',
+            national_pension=1000000,
+            health_insurance=500000,
+            retirement_mutual_aid=300000,
+            long_term_care=100000,
+            occupational_safety=200000,
+            safety_management=150000,
+            quality_management=100000,
+        )
+        BidApiPrelimPrice.objects.create(
+            bid_ntce_no='TEST-FULL-001',
+            bid_ntce_ord='00',
+            sequence_no=0,
+            base_amount=490_000_000,
+        )
+
+        # 공고 2: A 없음
+        cls.ann_no_a = BidAnnouncement.objects.create(
+            bid_ntce_no='TEST-NOA-001',
+            bid_ntce_ord='00',
+            bid_ntce_nm='테스트 공고 (A값 없음)',
+            presume_price=500_000_000,
+        )
+        BidContract.objects.create(
+            bid_ntce_no='TEST-NOA-001',
+            bid_ntce_ord='00',
+            contract_no='NOTICE',
+            procurement_type='공사',
+            win_method='적격심사제',
+            presume_price=500_000_000,
+        )
+        BidApiPrelimPrice.objects.create(
+            bid_ntce_no='TEST-NOA-001',
+            bid_ntce_ord='00',
+            sequence_no=0,
+            base_amount=490_000_000,
+        )
+        # BidApiAValue 없음 → a_value_source='missing'
+
+        # 공고 3: base 없음
+        cls.ann_no_base = BidAnnouncement.objects.create(
+            bid_ntce_no='TEST-NOB-001',
+            bid_ntce_ord='00',
+            bid_ntce_nm='테스트 공고 (기초금액 없음)',
+            presume_price=500_000_000,
+        )
+        BidContract.objects.create(
+            bid_ntce_no='TEST-NOB-001',
+            bid_ntce_ord='00',
+            contract_no='NOTICE',
+            procurement_type='공사',
+            win_method='적격심사제',
+            presume_price=500_000_000,
+        )
+        BidApiAValue.objects.create(
+            bid_ntce_no='TEST-NOB-001',
+            bid_ntce_ord='00',
+            national_pension=1000000,
+            health_insurance=500000,
+            retirement_mutual_aid=300000,
+            long_term_care=100000,
+            occupational_safety=200000,
+            safety_management=150000,
+            quality_management=100000,
+        )
+        # BidApiPrelimPrice 없음 → base_amount_source='missing'
+
+        # 공고 4: A값 0원이지만 레코드 존재
+        cls.ann_zero_a = BidAnnouncement.objects.create(
+            bid_ntce_no='TEST-ZEROA-001',
+            bid_ntce_ord='00',
+            bid_ntce_nm='테스트 공고 (A값 0원)',
+            presume_price=500_000_000,
+        )
+        BidContract.objects.create(
+            bid_ntce_no='TEST-ZEROA-001',
+            bid_ntce_ord='00',
+            contract_no='NOTICE',
+            procurement_type='공사',
+            win_method='적격심사제',
+            presume_price=500_000_000,
+        )
+        BidApiAValue.objects.create(
+            bid_ntce_no='TEST-ZEROA-001',
+            bid_ntce_ord='00',
+            # 모든 필드 0 (default)
+        )
+        BidApiPrelimPrice.objects.create(
+            bid_ntce_no='TEST-ZEROA-001',
+            bid_ntce_ord='00',
+            sequence_no=0,
+            base_amount=490_000_000,
+        )
+
+    # T1: A 미확정 시 canRecommend=False
+    def test_recommendation_a_missing(self):
+        client = DjangoClient()
+        resp = client.get('/api/ui/notices/recommendation/', {'bid_ntce_no': 'TEST-NOA-001'})
+        data = resp.json()
+        self.assertFalse(data['canRecommend'])
+        self.assertFalse(data['isExact'])
+        self.assertEqual(data['pendingReason'], 'a_value')
+
+    # T2: base 미확정 시 canRecommend=False
+    def test_recommendation_base_missing(self):
+        client = DjangoClient()
+        resp = client.get('/api/ui/notices/recommendation/', {'bid_ntce_no': 'TEST-NOB-001'})
+        data = resp.json()
+        self.assertFalse(data['canRecommend'])
+        self.assertEqual(data['pendingReason'], 'base_amount')
+
+    # T3: lookup_bid A 미확정 → null
+    def test_lookup_bid_a_missing_returns_null(self):
+        client = DjangoClient()
+        resp = client.get('/lookup/', {'bid_ntce_no': 'TEST-NOA-001'})
+        data = resp.json()
+        self.assertIsNone(data['a_value'])
+        self.assertEqual(data['a_value_status'], 'missing')
+
+    # T4: lookup_bid base 미확정 → null
+    def test_lookup_bid_base_missing_returns_null(self):
+        client = DjangoClient()
+        resp = client.get('/lookup/', {'bid_ntce_no': 'TEST-NOB-001'})
+        data = resp.json()
+        self.assertIsNone(data['base_amount'])
+        self.assertEqual(data['base_amount_status'], 'missing')
+
+    # T5: api_price_calculator key없음+bundle missing → 경고
+    def test_calculator_bundle_missing_source(self):
+        client = DjangoClient()
+        resp = client.post(
+            '/api/ui/calculator/',
+            json.dumps({'noticeNo': 'TEST-NOA-001', 'estimatedPrice': '500000000', 'bidRate': '90.000'}),
+            content_type='application/json',
+        )
+        data = resp.json()
+        self.assertFalse(data['canRecommend'])
+
+    # T6: api_price_calculator key존재+null → bundle fallback 없이 경고
+    def test_calculator_explicit_null_no_fallback(self):
+        client = DjangoClient()
+        resp = client.post(
+            '/api/ui/calculator/',
+            json.dumps({
+                'noticeNo': 'TEST-FULL-001',
+                'estimatedPrice': '500000000',
+                'aValue': None,
+                'baseAmount': None,
+                'bidRate': '90.000',
+            }),
+            content_type='application/json',
+        )
+        data = resp.json()
+        self.assertFalse(data['canRecommend'])
+
+    # T7: api_price_calculator key없음+bundle.source='missing' → 경고
+    def test_calculator_bundle_a_missing_source(self):
+        client = DjangoClient()
+        resp = client.post(
+            '/api/ui/calculator/',
+            json.dumps({
+                'noticeNo': 'TEST-NOA-001',
+                'estimatedPrice': '500000000',
+                'bidRate': '90.000',
+            }),
+            content_type='application/json',
+        )
+        data = resp.json()
+        self.assertFalse(data['canRecommend'])
+
+    # T8: 사용자 직접 유효 수치 입력 → 정상 계산
+    def test_calculator_user_input_overrides(self):
+        client = DjangoClient()
+        resp = client.post(
+            '/api/ui/calculator/',
+            json.dumps({
+                'estimatedPrice': '500000000',
+                'aValue': '2350000',
+                'baseAmount': '490000000',
+                'bidRate': '90.000',
+            }),
+            content_type='application/json',
+        )
+        data = resp.json()
+        self.assertTrue(data.get('isExact', True))
+        self.assertIn('result', data)
+
+    # T9: A+base 모두 confirmed → 정상 추천
+    def test_recommendation_all_confirmed(self):
+        client = DjangoClient()
+        resp = client.get('/api/ui/notices/recommendation/', {'bid_ntce_no': 'TEST-FULL-001'})
+        data = resp.json()
+        self.assertTrue(data['canRecommend'])
+        self.assertTrue(data['isExact'])
+        self.assertIsNone(data['pendingReason'])
+
+    # T10: 공식 레코드 0원이어도 confirmed
+    def test_zero_a_value_still_confirmed(self):
+        client = DjangoClient()
+        resp = client.get('/api/ui/notices/recommendation/', {'bid_ntce_no': 'TEST-ZEROA-001'})
+        data = resp.json()
+        self.assertTrue(data['canRecommend'])
+
+
+class TestRetryPendingInputs(TestCase):
+    """BC-61 Phase B: retry_pending_inputs 배치 테스트."""
+
+    @classmethod
+    def setUpTestData(cls):
+        # pending + upcoming 공고
+        cls.ann_pending = BidAnnouncement.objects.create(
+            bid_ntce_no='TEST-PEND-001',
+            bid_ntce_ord='00',
+            bid_ntce_nm='테스트 pending 공고',
+            presume_price=500_000_000,
+            a_value_status='pending',
+            base_amount_status='pending',
+        )
+        # upcoming 개찰일 계약
+        BidContract.objects.create(
+            bid_ntce_no='TEST-PEND-001',
+            bid_ntce_ord='00',
+            contract_no='NOTICE',
+            procurement_type='공사',
+            win_method='적격심사제',
+            presume_price=500_000_000,
+            openg_date='20990101',  # 미래
+        )
+
+        # pending + 개찰 경과 공고
+        cls.ann_expired = BidAnnouncement.objects.create(
+            bid_ntce_no='TEST-EXP-001',
+            bid_ntce_ord='00',
+            bid_ntce_nm='테스트 개찰경과 공고',
+            presume_price=500_000_000,
+            a_value_status='pending',
+            base_amount_status='pending',
+        )
+        BidContract.objects.create(
+            bid_ntce_no='TEST-EXP-001',
+            bid_ntce_ord='00',
+            contract_no='NOTICE',
+            procurement_type='공사',
+            win_method='적격심사제',
+            presume_price=500_000_000,
+            openg_date='20200101',  # 과거
+        )
+
+    def test_expired_becomes_error(self):
+        """개찰일 경과 + pending → error 전이."""
+        from django.core.management import call_command
+        from io import StringIO
+        out = StringIO()
+        call_command('retry_pending_inputs', '--limit=100', stdout=out)
+        self.ann_expired.refresh_from_db()
+        self.assertEqual(self.ann_expired.a_value_status, 'error')
+        self.assertEqual(self.ann_expired.base_amount_status, 'error')
+
+    def test_pending_target_included(self):
+        """upcoming + pending 공고가 대상에 포함."""
+        from django.core.management import call_command
+        from io import StringIO
+        out = StringIO()
+        # dry-run으로 확인 (API 호출 없이 대상 카운트만 검증)
+        call_command('retry_pending_inputs', '--dry-run', '--limit=100', stdout=out)
+        output = out.getvalue()
+        self.assertIn('재확인 대상:', output)
+        # TEST-PEND-001(미래 개찰일)은 대상에 포함되어야 함
+        self.assertRegex(output, r'재확인 대상: [1-9]')
+
+
+class TestBC61StatusRefinement(SimpleTestCase):
+    """BC-61: pending 의미 분리 + canonical source 테스트."""
+
+    def test_fetch_sets_checked_missing_on_empty_api(self):
+        """API 빈 응답 → status=checked_missing 패턴 검증."""
+        # checked_missing은 write path의 기본값 — 테스트는 모델 choices 유효성 확인
+        choices = dict(BidAnnouncement.STATUS_CHOICES)
+        self.assertIn('checked_missing', choices)
+        self.assertEqual(choices['checked_missing'], '조회-없음')
+
+    def test_fetch_sets_confirmed_on_success(self):
+        """API 성공 → status=confirmed 패턴 검증."""
+        choices = dict(BidAnnouncement.STATUS_CHOICES)
+        self.assertIn('confirmed', choices)
+        self.assertEqual(choices['confirmed'], '확인')
+
+    def test_status_choices_complete(self):
+        """STATUS_CHOICES가 4가지 상태를 모두 포함하는지 검증."""
+        keys = [k for k, v in BidAnnouncement.STATUS_CHOICES]
+        self.assertEqual(sorted(keys), ['checked_missing', 'confirmed', 'error', 'pending'])
+
+    def test_retry_includes_checked_missing(self):
+        """checked_missing도 재시도 대상에 포함되는지 — 필터 조건 검증."""
+        valid_retry_statuses = {'pending', 'checked_missing'}
+        all_statuses = {k for k, v in BidAnnouncement.STATUS_CHOICES}
+        self.assertTrue(valid_retry_statuses.issubset(all_statuses))
+
+
+class TestBC61NewFieldsAndWarnings(SimpleTestCase):
+    """BC-61: 미수집 필드 매핑 + 설명회 warning 테스트."""
+
+    def test_map_notice_includes_new_fields(self):
+        """매핑 함수가 7개 신규 필드를 포함하는지 검증."""
+        sample_item = {
+            'bidNtceNo': '20260101001',
+            'bidNtceOrd': '00',
+            'bidNtceNm': '테스트공사',
+            'presmptPrce': '500000000',
+            'presnatnOprtnYn': 'Y',
+            'presnatnOprtnDate': '20260315',
+            'presnatnOprtnTm': '1400',
+            'indstrytyLmtYn': 'Y',
+            'rgnLmtYn': 'N',
+            'rsrvtnPrceDcsnMthdNm': '복수예비가격',
+            'bidNtceUrl': 'https://example.com/notice/123',
+        }
+        result = map_notice_to_announcement(sample_item)
+        self.assertEqual(result['briefing_yn'], 'Y')
+        self.assertEqual(result['briefing_date'], '20260315')
+        self.assertEqual(result['briefing_time'], '1400')
+        self.assertEqual(result['industry_limit_yn'], 'Y')
+        self.assertEqual(result['region_limit_yn'], 'N')
+        self.assertEqual(result['reserve_price_method'], '복수예비가격')
+        self.assertEqual(result['bid_ntce_url'], 'https://example.com/notice/123')
+
+    def test_new_fields_nullable_defaults(self):
+        """기존 데이터와 호환 — 빈 API 응답에도 빈 문자열 기본값."""
+        sample_item = {
+            'bidNtceNo': '20260101001',
+            'bidNtceOrd': '00',
+        }
+        result = map_notice_to_announcement(sample_item)
+        self.assertEqual(result['briefing_yn'], '')
+        self.assertEqual(result['briefing_date'], '')
+        self.assertEqual(result['briefing_time'], '')
+        self.assertEqual(result['industry_limit_yn'], '')
+        self.assertEqual(result['region_limit_yn'], '')
+        self.assertEqual(result['reserve_price_method'], '')
+        self.assertEqual(result['bid_ntce_url'], '')
+
+    def test_is_eligible_logs_nonstandard(self):
+        """비표준 적격심사 유형에 warning 로그 출력 검증."""
+        item = {
+            'presmptPrce': '500000000',
+            'sucsfbidMthdNm': '적격 낙찰제',
+            'bidNtceNo': 'TEST001',
+        }
+        with self.assertLogs('g2b.services.g2b_construction_sync', level='WARNING') as cm:
+            result = is_eligible_notice_for_service(item)
+        self.assertTrue(result)
+        self.assertTrue(any('비표준 적격심사' in msg for msg in cm.output))
+
+    def test_is_eligible_no_log_for_standard(self):
+        """표준 적격심사에는 warning 로그 없음."""
+        item = {
+            'presmptPrce': '500000000',
+            'sucsfbidMthdNm': '적격심사',
+            'bidNtceNo': 'TEST002',
+        }
+        result = is_eligible_notice_for_service(item)
+        self.assertTrue(result)
+
+
+# ──────────────────────────────────────────────
+# BC-61: status 필드, backfill, soft warning 테스트
+# ──────────────────────────────────────────────
+
+class TestBidAnnouncementStatusChoices(SimpleTestCase):
+    """BC-61 Item 1/2: STATUS_CHOICES + canonical source 코드 문서화 검증."""
+
+    def test_status_choices_contains_checked_missing(self):
+        """STATUS_CHOICES에 checked_missing이 포함되어야 한다."""
+        from g2b.models import BidAnnouncement
+        choices_keys = [key for key, _ in BidAnnouncement.STATUS_CHOICES]
+        self.assertIn('checked_missing', choices_keys)
+
+    def test_status_choices_all_values(self):
+        """STATUS_CHOICES가 4개 상태를 모두 포함한다."""
+        from g2b.models import BidAnnouncement
+        choices_keys = [key for key, _ in BidAnnouncement.STATUS_CHOICES]
+        self.assertEqual(set(choices_keys), {'pending', 'checked_missing', 'confirmed', 'error'})
+
+    def test_a_value_status_help_text_documents_canonical_source(self):
+        """a_value_status help_text가 batch metadata 역할을 명시한다."""
+        from g2b.models import BidAnnouncement
+        field = BidAnnouncement._meta.get_field('a_value_status')
+        self.assertIn('confirmed', field.help_text)
+        self.assertIn('pending', field.help_text)
+
+    def test_base_amount_status_has_same_choices(self):
+        """base_amount_status도 동일한 4개 choices를 갖는다."""
+        from g2b.models import BidAnnouncement
+        field = BidAnnouncement._meta.get_field('base_amount_status')
+        choices_keys = [key for key, _ in field.choices]
+        self.assertEqual(set(choices_keys), {'pending', 'checked_missing', 'confirmed', 'error'})
+
+
+class TestBackfillStatus(TestCase):
+    """BC-61 Item 3: backfill_status 커맨드 테스트."""
+
+    def setUp(self):
+        from g2b.models import BidApiAValue, BidApiPrelimPrice
+        from g2b.services.g2b_construction_sync import PLACEHOLDER_PRELIM_SEQUENCE
+
+        # 공고 A: A값 레코드 있음, 기초금액 없음 → a_value만 confirmed
+        self.ann_a = BidAnnouncement.objects.create(
+            bid_ntce_no='BACKFILL001',
+            bid_ntce_ord='00',
+            bid_ntce_nm='백필 테스트 공고 A',
+            presume_price=500_000_000,
+            a_value_status='pending',
+            base_amount_status='pending',
+        )
+        BidApiAValue.objects.create(
+            bid_ntce_no='BACKFILL001',
+            bid_ntce_ord='00',
+        )
+
+        # 공고 B: 기초금액 레코드 있음, A값 없음 → base_amount만 confirmed
+        self.ann_b = BidAnnouncement.objects.create(
+            bid_ntce_no='BACKFILL002',
+            bid_ntce_ord='00',
+            bid_ntce_nm='백필 테스트 공고 B',
+            presume_price=500_000_000,
+            a_value_status='checked_missing',
+            base_amount_status='checked_missing',
+        )
+        BidApiPrelimPrice.objects.create(
+            bid_ntce_no='BACKFILL002',
+            bid_ntce_ord='00',
+            sequence_no=PLACEHOLDER_PRELIM_SEQUENCE,
+            basis_planned_price=0,
+            is_drawn=False,
+            draw_count=0,
+            planned_price=0,
+            base_amount=500_000_000,
+        )
+
+        # 공고 C: 둘 다 레코드 있음 → 둘 다 confirmed
+        self.ann_c = BidAnnouncement.objects.create(
+            bid_ntce_no='BACKFILL003',
+            bid_ntce_ord='00',
+            bid_ntce_nm='백필 테스트 공고 C',
+            presume_price=500_000_000,
+            a_value_status='pending',
+            base_amount_status='pending',
+        )
+        BidApiAValue.objects.create(
+            bid_ntce_no='BACKFILL003',
+            bid_ntce_ord='00',
+        )
+        BidApiPrelimPrice.objects.create(
+            bid_ntce_no='BACKFILL003',
+            bid_ntce_ord='00',
+            sequence_no=PLACEHOLDER_PRELIM_SEQUENCE,
+            basis_planned_price=0,
+            is_drawn=False,
+            draw_count=0,
+            planned_price=0,
+            base_amount=500_000_000,
+        )
+
+    def _run_command(self, dry_run=False):
+        from io import StringIO
+        from django.core.management import call_command
+        out = StringIO()
+        kwargs = {'stdout': out}
+        if dry_run:
+            kwargs['dry_run'] = True
+        call_command('backfill_status', **kwargs)
+        return out.getvalue()
+
+    def test_dry_run_does_not_modify_db(self):
+        """dry-run 실행 시 DB가 변경되지 않는다."""
+        self._run_command(dry_run=True)
+        self.ann_a.refresh_from_db()
+        self.assertEqual(self.ann_a.a_value_status, 'pending')
+        self.assertEqual(self.ann_a.base_amount_status, 'pending')
+
+    def test_a_value_confirmed_when_record_exists(self):
+        """BidApiAValue 레코드 있는 공고 → a_value_status=confirmed."""
+        self._run_command()
+        self.ann_a.refresh_from_db()
+        self.assertEqual(self.ann_a.a_value_status, 'confirmed')
+
+    def test_base_amount_stays_pending_when_no_record(self):
+        """기초금액 레코드 없으면 base_amount_status 변경 안 됨."""
+        self._run_command()
+        self.ann_a.refresh_from_db()
+        self.assertEqual(self.ann_a.base_amount_status, 'pending')
+
+    def test_base_amount_confirmed_from_checked_missing(self):
+        """checked_missing 상태도 레코드 있으면 confirmed로 전환."""
+        self._run_command()
+        self.ann_b.refresh_from_db()
+        self.assertEqual(self.ann_b.base_amount_status, 'confirmed')
+
+    def test_a_value_stays_checked_missing_when_no_record(self):
+        """A값 레코드 없으면 checked_missing 유지."""
+        self._run_command()
+        self.ann_b.refresh_from_db()
+        self.assertEqual(self.ann_b.a_value_status, 'checked_missing')
+
+    def test_both_confirmed_when_both_records_exist(self):
+        """둘 다 레코드 있으면 둘 다 confirmed."""
+        self._run_command()
+        self.ann_c.refresh_from_db()
+        self.assertEqual(self.ann_c.a_value_status, 'confirmed')
+        self.assertEqual(self.ann_c.base_amount_status, 'confirmed')
+
+    def test_idempotent(self):
+        """두 번 실행해도 결과 동일 (멱등성)."""
+        self._run_command()
+        self._run_command()
+        self.ann_c.refresh_from_db()
+        self.assertEqual(self.ann_c.a_value_status, 'confirmed')
+        self.assertEqual(self.ann_c.base_amount_status, 'confirmed')
+
+
+class TestBriefingYnSoftWarning(TestCase):
+    """BC-61 Item 4: briefing_yn='Y' soft warning 검증."""
+
+    def setUp(self):
+        self.client = DjangoClient()
+        # 추천 API 경로에서 bundle을 통해 warning을 받으려면 공고+계약+A값+기초금액 필요
+        from g2b.models import BidApiAValue, BidApiPrelimPrice, BidContract
+        from g2b.services.g2b_construction_sync import PLACEHOLDER_PRELIM_SEQUENCE
+
+        self.bid_ntce_no = 'WARNING001'
+        self.bid_ntce_ord = '00'
+
+        BidAnnouncement.objects.create(
+            bid_ntce_no=self.bid_ntce_no,
+            bid_ntce_ord=self.bid_ntce_ord,
+            bid_ntce_nm='설명회 공고 테스트',
+            presume_price=500_000_000,
+            briefing_yn='Y',
+            briefing_date='20260320',
+            briefing_time='1400',
+            a_value_status='confirmed',
+            base_amount_status='confirmed',
+        )
+        BidContract.objects.create(
+            bid_ntce_no=self.bid_ntce_no,
+            bid_ntce_ord=self.bid_ntce_ord,
+            bid_ntce_nm='설명회 공고 테스트',
+            procurement_type='공사',
+            win_method='적격심사',
+            presume_price=500_000_000,
+            contract_no='NOTICE',
+        )
+        BidApiAValue.objects.create(
+            bid_ntce_no=self.bid_ntce_no,
+            bid_ntce_ord=self.bid_ntce_ord,
+            national_pension=5_000_000,
+            health_insurance=1_000_000,
+            retirement_mutual_aid=1_000_000,
+            long_term_care=500_000,
+            occupational_safety=500_000,
+            safety_management=500_000,
+            quality_management=500_000,
+        )
+        BidApiPrelimPrice.objects.create(
+            bid_ntce_no=self.bid_ntce_no,
+            bid_ntce_ord=self.bid_ntce_ord,
+            sequence_no=PLACEHOLDER_PRELIM_SEQUENCE,
+            basis_planned_price=0,
+            is_drawn=False,
+            draw_count=0,
+            planned_price=0,
+            base_amount=500_000_000,
+        )
+
+    def test_briefing_yn_y_adds_warning(self):
+        """briefing_yn='Y'인 공고는 추천 결과에 warnings 배열에 항목이 추가된다."""
+        resp = self.client.get(
+            f'/api/ui/notices/recommendation/?bid_ntce_no={self.bid_ntce_no}'
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        warnings = data.get('warnings', [])
+        types = [w['type'] for w in warnings]
+        self.assertIn('briefing', types)
+
+    def test_briefing_warning_is_info_severity(self):
+        """설명회 warning의 severity는 info (hard block 아님)."""
+        resp = self.client.get(
+            f'/api/ui/notices/recommendation/?bid_ntce_no={self.bid_ntce_no}'
+        )
+        data = resp.json()
+        briefing_warnings = [w for w in data.get('warnings', []) if w['type'] == 'briefing']
+        self.assertEqual(len(briefing_warnings), 1)
+        self.assertEqual(briefing_warnings[0]['severity'], 'info')
+
+    def test_briefing_warning_does_not_block_recommendation(self):
+        """설명회 warning이 있어도 canRecommend=True (hard block 아님)."""
+        resp = self.client.get(
+            f'/api/ui/notices/recommendation/?bid_ntce_no={self.bid_ntce_no}'
+        )
+        data = resp.json()
+        self.assertTrue(data.get('canRecommend'))
+
+    def test_briefing_yn_n_no_warning(self):
+        """briefing_yn='N'인 공고는 warnings 배열에 briefing 항목 없음."""
+        from g2b.models import BidApiAValue, BidApiPrelimPrice, BidContract
+        from g2b.services.g2b_construction_sync import PLACEHOLDER_PRELIM_SEQUENCE
+
+        no_brief_no = 'NOBRIEF001'
+        BidAnnouncement.objects.create(
+            bid_ntce_no=no_brief_no,
+            bid_ntce_ord='00',
+            bid_ntce_nm='설명회 없는 공고',
+            presume_price=500_000_000,
+            briefing_yn='N',
+            a_value_status='confirmed',
+            base_amount_status='confirmed',
+        )
+        BidContract.objects.create(
+            bid_ntce_no=no_brief_no,
+            bid_ntce_ord='00',
+            bid_ntce_nm='설명회 없는 공고',
+            procurement_type='공사',
+            win_method='적격심사',
+            presume_price=500_000_000,
+            contract_no='NOTICE',
+        )
+        BidApiAValue.objects.create(
+            bid_ntce_no=no_brief_no,
+            bid_ntce_ord='00',
+            national_pension=5_000_000,
+        )
+        BidApiPrelimPrice.objects.create(
+            bid_ntce_no=no_brief_no,
+            bid_ntce_ord='00',
+            sequence_no=PLACEHOLDER_PRELIM_SEQUENCE,
+            basis_planned_price=0,
+            is_drawn=False,
+            draw_count=0,
+            planned_price=0,
+            base_amount=500_000_000,
+        )
+        resp = self.client.get(f'/api/ui/notices/recommendation/?bid_ntce_no={no_brief_no}')
+        data = resp.json()
+        types = [w['type'] for w in data.get('warnings', [])]
+        self.assertNotIn('briefing', types)

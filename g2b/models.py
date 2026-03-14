@@ -63,6 +63,36 @@ class BidAnnouncement(models.Model):
     bid_ntce_cnt = models.IntegerField("입찰공고건수", null=True, blank=True)
     winner_select_cnt = models.IntegerField("낙찰자선정건수", null=True, blank=True)
 
+    STATUS_CHOICES = [
+        ('pending', '미조회'),
+        ('checked_missing', '조회-없음'),
+        ('confirmed', '확인'),
+        ('error', '재시도제외'),
+    ]
+
+    a_value_status = models.CharField(
+        "A값 확정상태", max_length=20, default='pending',
+        choices=STATUS_CHOICES,
+        help_text='confirmed=공식레코드확인, pending=미확인, checked_missing=조회했으나없음, error=재시도제외',
+    )
+    base_amount_status = models.CharField(
+        "기초금액 확정상태", max_length=20, default='pending',
+        choices=STATUS_CHOICES,
+        help_text='confirmed=공식레코드확인, pending=미확인, checked_missing=조회했으나없음, error=재시도제외',
+    )
+
+    a_value_checked_at = models.DateTimeField('A값 최종조회일시', null=True, blank=True)
+    base_amount_checked_at = models.DateTimeField('기초금액 최종조회일시', null=True, blank=True)
+
+    # 추가 공고 정보 (API 미수집 → 신규 매핑)
+    briefing_yn = models.CharField("설명회실시여부", max_length=1, blank=True, default="")
+    briefing_date = models.CharField("설명회일자", max_length=8, blank=True, default="")
+    briefing_time = models.CharField("설명회시각", max_length=4, blank=True, default="")
+    industry_limit_yn = models.CharField("업종제한여부", max_length=1, blank=True, default="")
+    region_limit_yn = models.CharField("지역제한여부", max_length=1, blank=True, default="")
+    reserve_price_method = models.CharField("예정가격결정방법", max_length=40, blank=True, default="")
+    bid_ntce_url = models.CharField("공고URL", max_length=500, blank=True, default="")
+
     created_at = models.DateTimeField("적재일시", auto_now_add=True)
 
     class Meta:

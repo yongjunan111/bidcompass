@@ -127,6 +127,12 @@ export interface RecommendationBand {
   halfWidth: string;
 }
 
+export interface RecommendationWarning {
+  type: string;
+  message: string;
+  severity: 'info' | 'warning' | 'error';
+}
+
 export interface RecommendationData {
   notice: RecommendationNotice;
   strategies: StrategyCardData[];
@@ -141,6 +147,11 @@ export interface RecommendationData {
   aValueTotal: number;
   baseAmountValue: number;
   floorRateBidValue: number;
+  canRecommend: boolean;
+  isExact: boolean;
+  warningMessage: string | null;
+  pendingReason: 'a_value' | 'base_amount' | 'both' | null;
+  warnings?: RecommendationWarning[];
 }
 
 export interface BannerState {

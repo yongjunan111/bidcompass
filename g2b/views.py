@@ -54,6 +54,8 @@ def lookup_bid(request):
         'presume_price': ann.presume_price or 0,
     }
 
+    # Canonical source: record existence (NOT BidAnnouncement.a_value_status)
+    # status 필드는 배치 메타데이터이며, 추천 판정에 사용하지 않음
     # A값 조회
     av = BidApiAValue.objects.filter(
         bid_ntce_no=ann.bid_ntce_no,
@@ -66,14 +68,26 @@ def lookup_bid(request):
             av.occupational_safety + av.safety_management +
             av.quality_management
         )
+        result['a_value_status'] = 'confirmed'
     else:
-        result['a_value'] = 0
+        result['a_value'] = None  # 0이 아니라 null — 미확정 신호
+        result['a_value_status'] = 'missing'
 
     # 기초금액 조회 (복수예비가격 테이블에서)
     prelim = (BidApiPrelimPrice.objects
               .filter(bid_ntce_no=ann.bid_ntce_no, bid_ntce_ord=ann.bid_ntce_ord)
               .first())
-    result['base_amount'] = prelim.base_amount if prelim else 0
+    if prelim:
+        result['base_amount'] = prelim.base_amount
+        result['base_amount_status'] = 'confirmed'
+    else:
+        result['base_amount'] = None  # 0이 아니라 null — 미확정 신호
+        result['base_amount_status'] = 'missing'
+
+    result['exact_inputs_ready'] = (
+        result['a_value_status'] == 'confirmed'
+        and result['base_amount_status'] == 'confirmed'
+    )
 
     return JsonResponse(result)
 
@@ -191,6 +205,22 @@ def recommend(request):
         a_value = _parse_int(request.POST.get('a_value'))
         net_cost = _parse_int(request.POST.get('net_construction_cost')) or None
 
+        # Legacy 편의: POST hidden field로 status 전달.
+        # canonical source는 record existence이나, 레거시 뷰에서는
+        # 사용자가 직접 입력한 값(user_input)도 허용함.
+        a_value_status = request.POST.get('a_value_status', 'user_input')
+        base_amount_status = request.POST.get('base_amount_status', 'user_input')
+        exact_inputs_ready = (
+            a_value_status in ('confirmed', 'user_input')
+            and base_amount_status in ('confirmed', 'user_input')
+        )
+
+        if not exact_inputs_ready:
+            context['warning'] = 'A값 또는 기초금액이 아직 공개되지 않아 정확한 추천이 불가능합니다.'
+            context['exact_inputs_ready'] = False
+            context['form'] = request.POST
+            return render(request, 'g2b/recommend.html', context)
+
         if estimated_price <= 0:
             context['error'] = '추정가격을 입력하세요.'
             context['form'] = request.POST
@@ -222,6 +252,7 @@ def recommend(request):
             return render(request, 'g2b/recommend.html', context)
 
         context['result'] = True
+        context['exact_inputs_ready'] = True
         context['table_label'] = result.table_label
         context['optimal_bid_fmt'] = f"{result.optimal_bid:,}"
         context['optimal_score'] = f"{result.optimal_score:.0f}"
@@ -289,6 +320,22 @@ def ai_report(request):
     work_type_str = request.POST.get('work_type', 'construction')
     a_value = _parse_int(request.POST.get('a_value'))
     net_cost = _parse_int(request.POST.get('net_construction_cost')) or None
+
+    # Legacy 편의: POST hidden field로 status 전달.
+    # canonical source는 record existence이나, 레거시 뷰에서는
+    # 사용자가 직접 입력한 값(user_input)도 허용함.
+    a_value_status = request.POST.get('a_value_status', 'user_input')
+    base_amount_status = request.POST.get('base_amount_status', 'user_input')
+    exact_inputs_ready = (
+        a_value_status in ('confirmed', 'user_input')
+        and base_amount_status in ('confirmed', 'user_input')
+    )
+
+    if not exact_inputs_ready:
+        context['warning'] = 'A값 또는 기초금액이 아직 공개되지 않아 AI 리포트를 생성할 수 없습니다.'
+        context['exact_inputs_ready'] = False
+        context['form'] = request.POST
+        return render(request, 'g2b/ai_report.html', context)
 
     if estimated_price <= 0:
         context['error'] = '추정가격을 입력하세요.'
