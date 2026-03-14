@@ -108,6 +108,15 @@ def _format_datetime(value) -> str:
         return str(value)
 
 
+def _build_agency_label(ntce_org: str, demand_org: str, fallback: str = '') -> str:
+    """공고기관 (발주기관) 형태로 합침. 같으면 하나만 표시."""
+    ntce = ntce_org.strip()
+    demand = demand_org.strip()
+    if ntce and demand and ntce != demand:
+        return f'{ntce} | {demand}'
+    return ntce or demand or fallback or '기관 정보 없음'
+
+
 def _first_text(*values: str) -> str:
     for value in values:
         if value and value.strip():
@@ -307,12 +316,10 @@ def _serialize_notice_summary(bundle: NoticeBundle) -> dict[str, str]:
     return {
         'id': announcement.bid_ntce_no,
         'title': _first_text(announcement.bid_ntce_nm, '공고명 없음'),
-        'agency': _first_text(
-            contract.demand_org if contract else '',
+        'agency': _build_agency_label(
             contract.ntce_org if contract else '',
+            contract.demand_org if contract else '',
             announcement.ntce_dept,
-            announcement.ntce_person,
-            '기관 정보 없음',
         ),
         'deadline': _format_compact_date(contract.openg_date if contract else ''),
         'estimate': _format_currency(bundle.estimated_price),
