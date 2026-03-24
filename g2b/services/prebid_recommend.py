@@ -21,6 +21,7 @@ from g2b.services.bid_engine import (
     TableType,
     get_floor_rate,
 )
+from g2b.services.net_cost_estimator import estimate_net_construction_cost
 
 # TABLE별 밴드 허용 점수 하락폭 (2점 = 실전적 허용 범위)
 # coeff 2  → ±1.0%p,  coeff 4 → ±0.5%p,  coeff 20 → ±0.1%p
@@ -49,6 +50,9 @@ class PreBidResult:
     floor_rate_bid: int         # 하한 최소 투찰가
     floor_rate_pass: bool       # 최적 투찰가 하한율 통과 여부
     table_label: str            # 별표 표시명
+    net_cost_threshold: int     # 순공사원가 × 98% (실질 바닥가)
+    net_cost_pass: bool         # 최적 투찰가가 순공사원가 기준 통과 여부
+    net_cost_estimated: bool    # 순공사원가 추정값 사용 여부
 
 
 def prebid_recommend(
@@ -95,9 +99,18 @@ def prebid_recommend(
     floor_rate_bid = math.ceil(a + float(floor_rate) / 100 * (est - a))
 
     # ── 4) 하드 제약: 순공사원가 × 98% ──
-    floor_bid = None
+    net_cost_estimated = False
     if net_construction_cost is not None:
         floor_bid = math.ceil(net_construction_cost * 0.98)
+        net_cost_threshold = floor_bid
+    elif base_amount > 0:
+        est_info = estimate_net_construction_cost(base_amount)
+        floor_bid = est_info['threshold_98']
+        net_cost_threshold = floor_bid
+        net_cost_estimated = True
+    else:
+        floor_bid = None
+        net_cost_threshold = 0
 
     # ── 5) 바닥 제약 적용 ──
     effective_floor = max(floor_bid or 0, floor_rate_bid)
@@ -113,6 +126,7 @@ def prebid_recommend(
         optimal_bid = effective_floor
 
     floor_rate_pass = optimal_bid >= floor_rate_bid
+    net_cost_pass = net_cost_threshold == 0 or optimal_bid >= net_cost_threshold
 
     return PreBidResult(
         optimal_bid=optimal_bid,
@@ -126,4 +140,7 @@ def prebid_recommend(
         floor_rate_bid=floor_rate_bid,
         floor_rate_pass=floor_rate_pass,
         table_label=_TABLE_LABELS.get(table_type, str(table_type)),
+        net_cost_threshold=net_cost_threshold,
+        net_cost_pass=net_cost_pass,
+        net_cost_estimated=net_cost_estimated,
     )

@@ -106,6 +106,9 @@ export interface RecommendationJudgement {
   priceScore: string;
   passResult: string;
   selectedRate: string;
+  netCostThreshold?: string;
+  netCostPass?: boolean;
+  netCostEstimated?: boolean;
 }
 
 export interface RecommendationSimilar {

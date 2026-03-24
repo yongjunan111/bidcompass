@@ -247,6 +247,23 @@ export function RecommendationResultPage(): JSX.Element {
                   </article>
                 </div>
 
+                {data.judgement.netCostThreshold !== undefined ? (
+                  <div className="bc-list" style={{ marginTop: '0.75rem' }}>
+                    <div
+                      className={`bc-list-row ${data.judgement.netCostPass === false ? 'tone-error' : 'tone-success'}`.trim()}
+                    >
+                      <span>
+                        순공사원가 98%{data.judgement.netCostEstimated ? ' (추정)' : ''}
+                      </span>
+                      <strong>
+                        {data.judgement.netCostThreshold}
+                        {' — '}
+                        {data.judgement.netCostPass ? '통과' : '미달 주의'}
+                      </strong>
+                    </div>
+                  </div>
+                ) : null}
+
                 <div className="bc-range-box">
                   <div className="bc-range-head">
                     <div>

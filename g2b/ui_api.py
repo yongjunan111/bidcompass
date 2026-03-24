@@ -31,6 +31,7 @@ from g2b.services.bid_engine import (
     get_floor_rate,
     select_table,
 )
+from g2b.services.net_cost_estimator import estimate_net_construction_cost
 from g2b.services.prebid_recommend import prebid_recommend
 from g2b.services.report_stats import get_similar_bid_stats
 
@@ -182,6 +183,16 @@ def _eligible_contract_queryset():
     )
 
 
+REGION_SHORT_TO_FULL = {
+    '서울': '서울특별시', '부산': '부산광역시', '대구': '대구광역시',
+    '인천': '인천광역시', '광주': '광주광역시', '대전': '대전광역시',
+    '울산': '울산광역시', '세종': '세종특별자치시', '경기': '경기도',
+    '강원': '강원', '충북': '충청북도', '충남': '충청남도',
+    '전북': '전북특별자치도', '전남': '전라남도', '경북': '경상북도',
+    '경남': '경상남도', '제주': '제주특별자치도',
+}
+
+
 def _apply_notice_search_filters(contract_qs, query: str = '', region: str = ''):
     if query:
         contract_qs = contract_qs.filter(
@@ -194,12 +205,10 @@ def _apply_notice_search_filters(contract_qs, query: str = '', region: str = '')
         )
 
     if region:
+        full_region = REGION_SHORT_TO_FULL.get(region, region)
         contract_qs = contract_qs.filter(
-            Q(demand_org_area__icontains=region)
-            | Q(restrict_area_list__icontains=region)
-            | Q(demand_org__icontains=region)
-            | Q(ntce_org__icontains=region)
-            | Q(bid_ntce_nm__icontains=region)
+            Q(demand_org_area__icontains=full_region)
+            | Q(restrict_area_list__icontains=full_region)
         )
 
     return contract_qs
@@ -457,6 +466,9 @@ def _build_recommendation_payload(bundle: NoticeBundle) -> dict[str, Any]:
             'severity': 'info',
         })
 
+    # 순공사원가 98% 체크 (추정값 기반)
+    net_cost_info = estimate_net_construction_cost(bundle.base_amount)
+
     recommendation = prebid_recommend(
         base_amount=bundle.base_amount,
         a_value=bundle.a_value_total,
@@ -466,6 +478,21 @@ def _build_recommendation_payload(bundle: NoticeBundle) -> dict[str, Any]:
     similar_stats = get_similar_bid_stats(bundle.estimated_price)
     strategies = _strategy_cards(recommendation, bundle, similar_stats)
     base_strategy = next(item for item in strategies if item['key'] == 'base')
+
+    # 추천 투찰가(기준안)가 순공사원가 98% 기준을 통과하는지 확인
+    net_cost_threshold = net_cost_info['threshold_98']
+    base_bid_amount = recommendation.floor_rate_bid  # 하한가를 기준으로 체크 (보수적)
+    net_cost_pass = base_bid_amount >= net_cost_threshold
+
+    if not net_cost_pass:
+        warnings.append({
+            'type': 'net_cost',
+            'message': (
+                f'추천 투찰가가 순공사원가 98% 기준({_format_plain_currency(net_cost_threshold)})에 '
+                '미달할 수 있습니다. 실제 순공사원가를 확인하세요.'
+            ),
+            'severity': 'warning',
+        })
 
     return {
         'notice': {
@@ -484,6 +511,9 @@ def _build_recommendation_payload(bundle: NoticeBundle) -> dict[str, Any]:
             'priceScore': f'{recommendation.optimal_score:.2f}',
             'passResult': '통과 PASS' if recommendation.floor_rate_pass else '미달 FAIL',
             'selectedRate': base_strategy['rate'],
+            'netCostThreshold': _format_plain_currency(net_cost_threshold),
+            'netCostPass': net_cost_pass,
+            'netCostEstimated': net_cost_info['is_estimated'],
         },
         'similar': {
             'count': f"{similar_stats.get('count', 0):,}건",
@@ -593,10 +623,9 @@ def api_notice_search(request):
     seen = set()
     results = []
     for contract in contract_qs[:24]:
-        notice_key = (contract.bid_ntce_no, contract.bid_ntce_ord)
-        if notice_key in seen:
+        if contract.bid_ntce_no in seen:
             continue
-        seen.add(notice_key)
+        seen.add(contract.bid_ntce_no)
         try:
             bundle = _lookup_notice_bundle(contract.bid_ntce_no, contract.bid_ntce_ord)
         except Http404:
