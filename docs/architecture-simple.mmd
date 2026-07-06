@@ -1,0 +1,59 @@
+%%{init: {
+  "theme": "base",
+  "themeVariables": {
+    "background": "#0A1020",
+    "primaryTextColor": "#F8FAFC",
+    "secondaryTextColor": "#F8FAFC",
+    "tertiaryTextColor": "#F8FAFC",
+    "lineColor": "#E2E8F0",
+    "fontSize": "24px",
+    "fontFamily": "Pretendard, Noto Sans KR, Arial"
+  },
+  "flowchart": {
+    "curve": "linear",
+    "htmlLabels": true,
+    "nodeSpacing": 60,
+    "rankSpacing": 70
+  }
+}}%%
+flowchart TB
+    subgraph L1["데이터 수집"]
+        direction LR
+        A1["🏛️ 나라장터 G2B API<br/>(공고 · 낙찰 · 계약)"]
+        A2["24h 자동 수집 · 정제<br/>104만 공고 / 3,230만 투찰"]
+        A3[("PostgreSQL 15")]
+        A1 ==> A2 ==> A3
+    end
+
+    subgraph L2["규칙 엔진"]
+        direction LR
+        B1["별표 판정 (TABLE 1~5)<br/>+ A값 분리"]
+        B2["가격점수 산출<br/>Decimal 정밀연산"]
+        B3["3단계 전략 추천<br/>Safe · Base · Aggressive"]
+        B1 ==> B2 ==> B3
+    end
+
+    subgraph L3["서비스"]
+        direction LR
+        C1["React SPA<br/>공고 조회 · 계산기"]
+        C2["추천 결과 시각화<br/>하한율 체크 · 점수 비교"]
+        C3["🤖 AI 전략 리포트<br/>GPT 기반 근거 · 리스크"]
+        C1 ==> C2 ==> C3
+    end
+
+    A3 ==>|"입찰 데이터"| B1
+    B3 ==>|"추천 결과"| C1
+
+    style L1 fill:#0F1B33,stroke:#60A5FA,stroke-width:3px,color:#F8FAFC
+    style L2 fill:#1A1533,stroke:#A78BFA,stroke-width:3px,color:#F8FAFC
+    style L3 fill:#0F241D,stroke:#34D399,stroke-width:3px,color:#F8FAFC
+
+    classDef data fill:#16243D,stroke:#60A5FA,stroke-width:2px,color:#F8FAFC;
+    classDef engine fill:#241B45,stroke:#A78BFA,stroke-width:2px,color:#F8FAFC;
+    classDef front fill:#133126,stroke:#34D399,stroke-width:2px,color:#F8FAFC;
+
+    class A1,A2,A3 data;
+    class B1,B2,B3 engine;
+    class C1,C2,C3 front;
+
+    linkStyle default stroke:#E2E8F0,stroke-width:4px;

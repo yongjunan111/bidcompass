@@ -10,7 +10,6 @@ wheels/
 .venv
 
 # Docs (원본 PDF/엑셀/변환 파일)
-docs/
 
 # Claude Code
 .claude/
@@ -19,7 +18,7 @@ docs/
 .gemini/
 
 # Data (CSV 원본은 WSL ~/bidcompass_data/에 보관)
-data/
+/data/
 
 # Environment
 .env
@@ -30,3 +29,6 @@ data/
 
 # Node
 node_modules/
+
+# macOS AppleDouble
+._*
