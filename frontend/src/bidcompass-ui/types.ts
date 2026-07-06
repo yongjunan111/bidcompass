@@ -109,9 +109,13 @@ export interface RecommendationJudgement {
   netCostThreshold?: string;
   netCostPass?: boolean;
   netCostEstimated?: boolean;
+  marketApplied?: boolean;
+  marketSegment?: string;
+  marketCenter?: string;
 }
 
 export interface RecommendationSimilar {
+  applied?: boolean;
   count: string;
   median: string;
   variance: string;

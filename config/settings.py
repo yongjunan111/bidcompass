@@ -140,3 +140,6 @@ G2B_SERVER_FILTERS = {
         'intrntnlDivCd': os.getenv('G2B_FILTER_INTL_DIV', ''),
     },
 }
+
+# 시장 세그먼트 기반 추천 주입 (기본 비활성 — A/B 백테스트 검증 후 전환 결정)
+MARKET_RECOMMEND_ENABLED = os.getenv('MARKET_RECOMMEND_ENABLED', 'false').lower() in ('true', '1', 'yes')

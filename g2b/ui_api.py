@@ -7,6 +7,7 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from django.conf import settings
 from django.db.models import Exists, OuterRef, Q
 from django.http import Http404, JsonResponse
 from django.shortcuts import render
@@ -31,6 +32,7 @@ from g2b.services.bid_engine import (
     get_floor_rate,
     select_table,
 )
+from g2b.services.market_policy import get_market_policy
 from g2b.services.net_cost_estimator import estimate_net_construction_cost
 from g2b.services.prebid_recommend import prebid_recommend
 from g2b.services.report_stats import get_similar_bid_stats
@@ -149,10 +151,11 @@ def _infer_work_type(announcement: BidAnnouncement | None, requested: str | None
 
 
 def _variance_label(similar_stats: dict) -> str:
+    # bid_rate는 % 단위(예: 90.12) → p90-p10 폭도 %p 단위로 판정
     width = float(similar_stats.get('p90_rate', 0) or 0) - float(similar_stats.get('p10_rate', 0) or 0)
-    if width <= 0.08:
+    if width <= 2.0:
         return '낮음'
-    if width <= 0.18:
+    if width <= 4.0:
         return '보통'
     return '높음'
 
@@ -357,6 +360,14 @@ def _strategy_cards(result, bundle: NoticeBundle, similar_stats: dict) -> list[d
     variance = _variance_label(similar_stats)
     competition = _competition_label(similar_stats)
 
+    # base 카드 문구: 시장 반영 여부에 따라 정직하게 분기
+    if result.market_based:
+        base_reason = f'유사 공고 세그먼트({result.market_segment}) 중앙 투찰률을 반영한 기본안입니다.'
+        base_expected_range = '시장 중앙값 기반'
+    else:
+        base_reason = '가격점수 만점 구간(90%) 기준의 계산식 기본안입니다.'
+        base_expected_range = '90% 고정'
+
     return [
         {
             'key': 'safe',
@@ -368,7 +379,7 @@ def _strategy_cards(result, bundle: NoticeBundle, similar_stats: dict) -> list[d
             'expectedRange': '보수 구간',
             'summary': [
                 '하한율 방어를 먼저 보는 상황에서 가장 안정적인 안입니다.',
-                f'유사 공고 분산은 {variance}이며, 보수적 전략의 설명력이 충분합니다.',
+                f'최근 유사 공고의 투찰률 분산은 {variance}입니다.',
                 '첫 보고안이나 내부 검토 초안으로 사용하기 좋습니다.',
             ],
             'amount': _format_currency(result.safe_bid),
@@ -379,11 +390,11 @@ def _strategy_cards(result, bundle: NoticeBundle, similar_stats: dict) -> list[d
             'rate': bid_rate(result.optimal_bid),
             'risk': '낮음',
             'desc': '안정성과 기대값의 균형이 가장 좋은 기본 전략입니다.',
-            'reason': '가격점수 구조와 유사 공고 분포를 함께 반영한 기본안입니다.',
-            'expectedRange': '중앙값 인접',
+            'reason': base_reason,
+            'expectedRange': base_expected_range,
             'summary': [
                 '기본 추천안으로 설명하기 가장 쉬운 카드입니다.',
-                f'최근 경쟁 강도는 {competition}이며, 과도한 공격 전략은 필요하지 않습니다.',
+                f'최근 유사 공고의 경쟁 강도는 {competition}입니다.',
                 '실무자가 기본안과 비교안을 함께 보고 판단하기에 적합합니다.',
             ],
             'amount': _format_currency(result.optimal_bid),
@@ -446,7 +457,7 @@ def _build_recommendation_payload(bundle: NoticeBundle) -> dict[str, Any]:
             },
             'strategies': [],
             'judgement': {},
-            'similar': {},
+            'similar': {'applied': False},
             'floorRate': '-',
             'floorBid': '-',
             'band': {},
@@ -469,13 +480,34 @@ def _build_recommendation_payload(bundle: NoticeBundle) -> dict[str, Any]:
     # 순공사원가 98% 체크 (추정값 기반)
     net_cost_info = estimate_net_construction_cost(bundle.base_amount)
 
-    recommendation = prebid_recommend(
-        base_amount=bundle.base_amount,
-        a_value=bundle.a_value_total,
-        table_type=table_type,
-        presume_price=bundle.estimated_price,
-    )
+    # 유사 공고 통계를 먼저 조회 (시장 정책의 경쟁강도 입력으로 사용)
     similar_stats = get_similar_bid_stats(bundle.estimated_price)
+
+    # 시장 세그먼트 정책 (플래그 활성 시에만; 게이트 미통과 시 None → 기존 90% 기본)
+    market_policy = None
+    if settings.MARKET_RECOMMEND_ENABLED:
+        market_policy = get_market_policy(
+            table_type,
+            similar_stats.get('avg_bidder_cnt') or None,
+            bundle.estimated_price,
+        )
+
+    if market_policy is not None:
+        recommendation = prebid_recommend(
+            base_amount=bundle.base_amount,
+            a_value=bundle.a_value_total,
+            table_type=table_type,
+            presume_price=bundle.estimated_price,
+            market_center=market_policy.center,
+            market_segment=market_policy.segment_id,
+        )
+    else:
+        recommendation = prebid_recommend(
+            base_amount=bundle.base_amount,
+            a_value=bundle.a_value_total,
+            table_type=table_type,
+            presume_price=bundle.estimated_price,
+        )
     strategies = _strategy_cards(recommendation, bundle, similar_stats)
     base_strategy = next(item for item in strategies if item['key'] == 'base')
 
@@ -514,8 +546,16 @@ def _build_recommendation_payload(bundle: NoticeBundle) -> dict[str, Any]:
             'netCostThreshold': _format_plain_currency(net_cost_threshold),
             'netCostPass': net_cost_pass,
             'netCostEstimated': net_cost_info['is_estimated'],
+            'marketApplied': recommendation.market_based,
+            'marketSegment': recommendation.market_segment,
+            'marketCenter': (
+                f'{recommendation.market_center:.2f}%'
+                if recommendation.market_center is not None
+                else '-'
+            ),
         },
         'similar': {
+            'applied': recommendation.market_based,
             'count': f"{similar_stats.get('count', 0):,}건",
             'median': _format_percent(similar_stats.get('p50_rate', 0), 3),
             'variance': _variance_label(similar_stats),

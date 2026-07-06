@@ -569,8 +569,10 @@ class TestBidAnalysisEngine(SimpleTestCase):
             )
 
     def test_specialty_routing(self):
-        """전문공사 3~50억 → TABLE_2B."""
-        est = 10 * UNIT_EOUK
+        """전문공사 3~10억 미만 → TABLE_2B.
+        10억 이상은 전문공사도 TABLE_2A (bid_engine.py:234 조건 순서 참조).
+        """
+        est = 5 * UNIT_EOUK  # 5억: 3억 이상 10억 미만 → TABLE_2B
         a_items = self._make_a_items(1 * UNIT_EOUK)
 
         engine = BidAnalysisEngine(
@@ -928,13 +930,13 @@ class TestCalculatorView(TestCase):
         self.client = DjangoClient()
 
     def test_get_renders_form(self):
-        resp = self.client.get("/calculator/")
+        resp = self.client.get("/legacy/calculator/")
         self.assertEqual(resp.status_code, 200)
         self.assertContains(resp, "가격점수 계산기")
 
     def test_post_normal_calculation(self):
         """추정가격 1.5억, A값 0, 투찰금액 1.35억, 일반공사 → TABLE_5, 점수 출력."""
-        resp = self.client.post("/calculator/", {
+        resp = self.client.post("/legacy/calculator/", {
             "estimated_price": "150000000",
             "work_type": "construction",
             "bid_price": "135000000",
@@ -953,7 +955,7 @@ class TestCalculatorView(TestCase):
 
     def test_post_missing_estimated_price(self):
         """추정가격 미입력 → 에러 메시지."""
-        resp = self.client.post("/calculator/", {
+        resp = self.client.post("/legacy/calculator/", {
             "estimated_price": "",
             "work_type": "construction",
         })
@@ -962,7 +964,7 @@ class TestCalculatorView(TestCase):
 
     def test_post_out_of_scope(self):
         """100억 이상 → OUT_OF_SCOPE."""
-        resp = self.client.post("/calculator/", {
+        resp = self.client.post("/legacy/calculator/", {
             "estimated_price": "10000000000",
             "work_type": "construction",
             "national_pension": "0",
@@ -978,7 +980,7 @@ class TestCalculatorView(TestCase):
 
     def test_post_heatmap_generated(self):
         """히트맵 데이터가 생성되어야 함."""
-        resp = self.client.post("/calculator/", {
+        resp = self.client.post("/legacy/calculator/", {
             "estimated_price": "150000000",
             "work_type": "construction",
             "national_pension": "0",
@@ -1004,7 +1006,7 @@ class TestRecommendView(TestCase):
         self.client = DjangoClient()
 
     def test_get_renders_form(self):
-        resp = self.client.get("/recommend/")
+        resp = self.client.get("/legacy/recommend/")
         self.assertEqual(resp.status_code, 200)
         self.assertContains(resp, "사전 투찰 추천기")
 
@@ -1016,9 +1018,9 @@ class TestRecommendView(TestCase):
             "work_type": "construction",
             "a_value": "50000000",
         }
-        resp = self.client.post("/recommend/", data)
+        resp = self.client.post("/legacy/recommend/", data)
         self.assertEqual(resp.status_code, 200)
-        self.assertContains(resp, "추천 투찰 구간")
+        self.assertContains(resp, "추천 투찰률")
         self.assertIn("optimal_bid_fmt", resp.context)
         self.assertIn("safe_bid_fmt", resp.context)
         self.assertIn("aggressive_bid_fmt", resp.context)
@@ -1030,7 +1032,7 @@ class TestRecommendView(TestCase):
             "work_type": "construction",
             "a_value": "0",
         }
-        resp = self.client.post("/recommend/", data)
+        resp = self.client.post("/legacy/recommend/", data)
         self.assertEqual(resp.status_code, 200)
         self.assertTrue(resp.context["result"])
 
@@ -1040,7 +1042,7 @@ class TestRecommendView(TestCase):
             "work_type": "construction",
             "a_value": "0",
         }
-        resp = self.client.post("/recommend/", data)
+        resp = self.client.post("/legacy/recommend/", data)
         self.assertEqual(resp.status_code, 200)
         self.assertContains(resp, "추정가격을 입력하세요")
 
@@ -1051,7 +1053,7 @@ class TestRecommendView(TestCase):
             "work_type": "construction",
             "a_value": "0",
         }
-        resp = self.client.post("/recommend/", data)
+        resp = self.client.post("/legacy/recommend/", data)
         self.assertEqual(resp.status_code, 200)
         self.assertContains(resp, "적격심사 대상 외")
 
@@ -1063,7 +1065,7 @@ class TestRecommendView(TestCase):
             "work_type": "construction",
             "a_value": "50000000",
         }
-        resp = self.client.post("/recommend/", data)
+        resp = self.client.post("/legacy/recommend/", data)
         self.assertEqual(resp.status_code, 200)
         self.assertContains(resp, "낙찰하한율")
         self.assertContains(resp, "하한 최소 투찰가")
@@ -1077,7 +1079,7 @@ class TestRecommendView(TestCase):
             "work_type": "construction",
             "a_value": "50000000",
         }
-        resp = self.client.post("/recommend/", data)
+        resp = self.client.post("/legacy/recommend/", data)
         self.assertEqual(resp.status_code, 200)
         self.assertIsInstance(resp.context["floor_rate_bid"], int)
 
@@ -1088,7 +1090,7 @@ class TestRecommendView(TestCase):
             "work_type": "construction",
             "a_value": "0",
         }
-        resp = self.client.post("/recommend/", data)
+        resp = self.client.post("/legacy/recommend/", data)
         self.assertEqual(resp.status_code, 200)
         self.assertNotIn("n_scenarios", resp.context)
         self.assertNotIn("scenario_rows", resp.context)
@@ -1419,7 +1421,7 @@ class TestAIReportView(TestCase):
         self.client = DjangoClient()
 
     def test_get_renders_form(self):
-        resp = self.client.get("/ai-report/")
+        resp = self.client.get("/legacy/ai-report/")
         self.assertEqual(resp.status_code, 200)
         self.assertContains(resp, "AI 전략 리포트")
 
@@ -1684,8 +1686,10 @@ class TestUnifiedUiConstructionFilters(TestCase):
             win_method="적격심사제",
             presume_price=520_000_000,
         )
-        BidContract.objects.filter(bid_ntce_no="CONTRACT-REGION-001").update(demand_org_area="서울")
-        BidContract.objects.filter(bid_ntce_no="CONTRACT-REGION-002").update(demand_org_area="부산")
+        # _apply_notice_search_filters가 REGION_SHORT_TO_FULL로 변환 후 icontains 검색하므로
+        # demand_org_area에는 full name을 저장해야 매칭됨
+        BidContract.objects.filter(bid_ntce_no="CONTRACT-REGION-001").update(demand_org_area="서울특별시")
+        BidContract.objects.filter(bid_ntce_no="CONTRACT-REGION-002").update(demand_org_area="부산광역시")
 
         response = self.client.get("/api/ui/notices/search/", {"region": "서울"})
         self.assertEqual(response.status_code, 200)
@@ -2774,3 +2778,460 @@ class TestBriefingYnSoftWarning(TestCase):
         data = resp.json()
         types = [w['type'] for w in data.get('warnings', [])]
         self.assertNotIn('briefing', types)
+
+
+# ──────────────────────────────────────────────
+# TestMarketPolicy — 시장 세그먼트 정책 조회 (market_policy.py)
+# ──────────────────────────────────────────────
+
+class TestMarketPolicy(SimpleTestCase):
+    """get_market_policy 게이트/버킷/폴백 검증.
+
+    기대값은 g2b/resources/segment_policy_v1.json 실측 데이터 기준.
+    """
+
+    def setUp(self):
+        from g2b.services import market_policy as mp
+        self.mp = mp
+        # 다른 테스트의 패치 영향 제거를 위해 캐시 초기화
+        mp._load_policy_map.cache_clear()
+
+    def tearDown(self):
+        self.mp._load_policy_map.cache_clear()
+
+    # ── 정상 조회 (활성 세그먼트) ──
+
+    def test_active_segment_t5_c200_plus(self):
+        # T5_C200+: confidence 1.0, sample_n 16898, center 90.12 ≤ high 90.7,
+        # high 90.7 ≥ floor 89.745 (<10억) → 활성
+        policy = self.mp.get_market_policy(TableType.TABLE_5, 250.0, 150_000_000)
+        self.assertIsNotNone(policy)
+        self.assertEqual(policy.segment_id, 'T5_C200+')
+        self.assertEqual(policy.center, 90.12)
+        self.assertEqual(policy.ratio_low, 89.75)
+        self.assertEqual(policy.ratio_high, 90.7)
+        self.assertEqual(policy.confidence, 1.0)
+        self.assertEqual(policy.sample_n, 16898)
+
+    def test_active_segment_t3_c01_09(self):
+        # T3_C01_09: confidence 1.0, sample_n 2711, center 88.34 ≤ high 90.96,
+        # high 90.96 ≥ floor 89.745 → 활성
+        policy = self.mp.get_market_policy(TableType.TABLE_3, 5.0, 500_000_000)
+        self.assertIsNotNone(policy)
+        self.assertEqual(policy.segment_id, 'T3_C01_09')
+        self.assertEqual(policy.center, 88.34)
+        self.assertEqual(policy.sample_n, 2711)
+
+    def test_gate_boundary_exact_values_pass(self):
+        # T4_C30_49: confidence 0.5(경계), sample_n 1002 — 게이트 경계 통과 확인
+        policy = self.mp.get_market_policy(TableType.TABLE_4, 35.0, 250_000_000)
+        self.assertIsNotNone(policy)
+        self.assertEqual(policy.segment_id, 'T4_C30_49')
+        self.assertEqual(policy.confidence, 0.5)
+        self.assertEqual(policy.sample_n, 1002)
+
+    def test_frozen_dataclass(self):
+        policy = self.mp.get_market_policy(TableType.TABLE_5, 250.0, 150_000_000)
+        with self.assertRaises(Exception):
+            policy.center = 99.0
+
+    # ── price_seg 매핑 ──
+
+    def test_table_2b_returns_none(self):
+        self.assertIsNone(
+            self.mp.get_market_policy(TableType.TABLE_2B, 50.0, 500_000_000)
+        )
+
+    def test_out_of_scope_returns_none(self):
+        self.assertIsNone(
+            self.mp.get_market_policy(TableType.OUT_OF_SCOPE, 50.0, 15_000_000_000)
+        )
+
+    # ── comp_seg 버킷 ──
+
+    def test_bidder_none_or_nonpositive_returns_none(self):
+        self.assertIsNone(self.mp.get_market_policy(TableType.TABLE_5, None, 150_000_000))
+        self.assertIsNone(self.mp.get_market_policy(TableType.TABLE_5, 0, 150_000_000))
+        self.assertIsNone(self.mp.get_market_policy(TableType.TABLE_5, -3.0, 150_000_000))
+
+    def test_comp_seg_bucket_boundaries(self):
+        cases = [
+            (0.1, 'C01_09'),
+            (9.9, 'C01_09'),
+            (10.0, 'C10_29'),
+            (29.9, 'C10_29'),
+            (30.0, 'C30_49'),
+            (49.9, 'C30_49'),
+            (50.0, 'C50_99'),
+            (99.9, 'C50_99'),
+            (100.0, 'C100_199'),
+            (199.9, 'C100_199'),
+            (200.0, 'C200+'),
+            (1000.0, 'C200+'),
+        ]
+        for cnt, expected in cases:
+            with self.subTest(cnt=cnt):
+                self.assertEqual(self.mp._comp_seg(cnt), expected)
+
+    def test_bucket_boundary_end_to_end_t5(self):
+        # 9.9 → T5_C01_09 (활성), 10.0 → T5_C10_29 (high 89.71 < floor 89.745 → 폴백)
+        policy_99 = self.mp.get_market_policy(TableType.TABLE_5, 9.9, 150_000_000)
+        self.assertIsNotNone(policy_99)
+        self.assertEqual(policy_99.segment_id, 'T5_C01_09')
+        self.assertIsNone(self.mp.get_market_policy(TableType.TABLE_5, 10.0, 150_000_000))
+        # 29.9 → T5_C10_29 (폴백), 30.0 → T5_C30_49 (활성)
+        self.assertIsNone(self.mp.get_market_policy(TableType.TABLE_5, 29.9, 150_000_000))
+        policy_30 = self.mp.get_market_policy(TableType.TABLE_5, 30.0, 150_000_000)
+        self.assertIsNotNone(policy_30)
+        self.assertEqual(policy_30.segment_id, 'T5_C30_49')
+
+    # ── 게이트 1: confidence ──
+
+    def test_confidence_gate_t1_segments(self):
+        # T1 전 세그먼트 confidence < 0.5 (0.01~0.13) → 전부 폴백
+        for cnt in (5.0, 15.0, 35.0, 70.0, 150.0, 250.0):
+            with self.subTest(cnt=cnt):
+                self.assertIsNone(
+                    self.mp.get_market_policy(TableType.TABLE_1, cnt, 6_000_000_000)
+                )
+
+    # ── 게이트 2: sample_n (실측 데이터에 해당 케이스 없음 → 합성 데이터) ──
+
+    def test_sample_n_gate_synthetic(self):
+        from unittest.mock import patch
+        synthetic = {
+            'T5_C01_09': {
+                'segment_id': 'T5_C01_09', 'center': 90.0,
+                'ratio_low': 89.8, 'ratio_high': 90.5,
+                'confidence': 1.0, 'sample_n': 999,
+            },
+        }
+        with patch.object(self.mp, '_load_policy_map', return_value=synthetic):
+            self.assertIsNone(
+                self.mp.get_market_policy(TableType.TABLE_5, 5.0, 150_000_000)
+            )
+
+    # ── 게이트 3: center > ratio_high ──
+
+    def test_center_above_high_gate_synthetic(self):
+        from unittest.mock import patch
+        synthetic = {
+            'T5_C01_09': {
+                'segment_id': 'T5_C01_09', 'center': 91.0,
+                'ratio_low': 89.8, 'ratio_high': 90.5,
+                'confidence': 1.0, 'sample_n': 5000,
+            },
+        }
+        with patch.object(self.mp, '_load_policy_map', return_value=synthetic):
+            self.assertIsNone(
+                self.mp.get_market_policy(TableType.TABLE_5, 5.0, 150_000_000)
+            )
+
+    def test_center_below_low_is_allowed_synthetic(self):
+        # center < ratio_low는 허용 (floor 클램프가 처리)
+        from unittest.mock import patch
+        synthetic = {
+            'T5_C01_09': {
+                'segment_id': 'T5_C01_09', 'center': 89.0,
+                'ratio_low': 89.8, 'ratio_high': 90.5,
+                'confidence': 1.0, 'sample_n': 5000,
+            },
+        }
+        with patch.object(self.mp, '_load_policy_map', return_value=synthetic):
+            policy = self.mp.get_market_policy(TableType.TABLE_5, 5.0, 150_000_000)
+            self.assertIsNotNone(policy)
+            self.assertEqual(policy.center, 89.0)
+
+    # ── 게이트 4: 하한율 (floor) ──
+
+    def test_floor_gate_t2a_c10_29(self):
+        # T2A_C10_29: confidence 0.57, sample_n 1139 통과하지만
+        # ratio_high 83.71 < floor 88.745 (10~50억) → 폴백
+        self.assertIsNone(
+            self.mp.get_market_policy(TableType.TABLE_2A, 15.0, 2_000_000_000)
+        )
+
+    def test_floor_gate_t2a_c200_passes(self):
+        # T2A_C200+: ratio_high 89.79 ≥ floor 88.745 → 활성 (대조군)
+        policy = self.mp.get_market_policy(TableType.TABLE_2A, 250.0, 2_000_000_000)
+        self.assertIsNotNone(policy)
+        self.assertEqual(policy.segment_id, 'T2A_C200+')
+        self.assertEqual(policy.center, 89.26)
+
+    def test_invalid_estimated_price_returns_none(self):
+        # get_floor_rate가 예외를 던지지 않고 폴백해야 함
+        self.assertIsNone(self.mp.get_market_policy(TableType.TABLE_5, 5.0, 0))
+        self.assertIsNone(self.mp.get_market_policy(TableType.TABLE_5, 5.0, -1))
+
+    # ── 로드 실패 폴백 ──
+
+    def test_missing_file_returns_none(self):
+        from unittest.mock import patch
+        missing = Path('/nonexistent/segment_policy_v1.json')
+        self.mp._load_policy_map.cache_clear()
+        with patch.object(self.mp, '_POLICY_PATH', missing):
+            self.assertIsNone(
+                self.mp.get_market_policy(TableType.TABLE_5, 250.0, 150_000_000)
+            )
+        self.mp._load_policy_map.cache_clear()
+
+    def test_missing_segment_returns_none_synthetic(self):
+        from unittest.mock import patch
+        with patch.object(self.mp, '_load_policy_map', return_value={}):
+            self.assertIsNone(
+                self.mp.get_market_policy(TableType.TABLE_5, 250.0, 150_000_000)
+            )
+
+
+# ──────────────────────────────────────────────
+# 시장 기반 추천: prebid_recommend market 모드 테스트
+# ──────────────────────────────────────────────
+
+class TestPrebidMarketMode(SimpleTestCase):
+    """prebid_recommend market_center 주입 모드 테스트.
+
+    기준 케이스: TABLE_3, base=5억, A=5천만, presume=5억
+      - floor_rate 89.745% → floor_rate_bid = 453,852,501
+      - 순공사원가 98% 추정 threshold = 412,090,000
+      - effective_floor = 453,852,501 (est 대비 약 90.77%)
+    """
+
+    BASE = 500_000_000
+    A = 50_000_000
+
+    def _call(self, **kwargs):
+        from g2b.services.prebid_recommend import prebid_recommend
+        return prebid_recommend(
+            base_amount=self.BASE,
+            a_value=self.A,
+            table_type=TableType.TABLE_3,
+            presume_price=self.BASE,
+            **kwargs,
+        )
+
+    def test_market_center_above_floor(self):
+        """floor 위의 center → optimal = round(center/100 * est)."""
+        result = self._call(market_center=92.0, market_segment='T3_C10_29')
+        self.assertEqual(result.optimal_bid, round(0.92 * self.BASE))  # 460,000,000
+        self.assertTrue(result.market_based)
+        self.assertEqual(result.market_center, 92.0)
+        self.assertEqual(result.market_segment, 'T3_C10_29')
+        # 밴드: center ± half_width(0.1%p), floor(453,852,501) 위라 클램프 없음
+        self.assertEqual(result.band_low, round(91.9 / 100 * self.BASE))
+        self.assertEqual(result.band_high, round(92.1 / 100 * self.BASE))
+
+    def test_market_center_below_floor_clamped(self):
+        """floor 아래 center → effective_floor로 클램프 + 밴드 불변식 유지."""
+        result = self._call(market_center=88.0, market_segment='T3_C30_49')
+        # effective_floor = floor_rate_bid (순공사원가 threshold보다 큼)
+        self.assertEqual(result.optimal_bid, result.floor_rate_bid)
+        self.assertGreater(result.floor_rate_bid, round(0.88 * self.BASE))
+        # 불변식: band_low ≤ optimal_bid ≤ band_high (뒤집힘 없음)
+        self.assertLessEqual(result.band_low, result.optimal_bid)
+        self.assertLessEqual(result.optimal_bid, result.band_high)
+        self.assertGreaterEqual(result.band_low, result.floor_rate_bid)
+        self.assertTrue(result.floor_rate_pass)
+        self.assertTrue(result.net_cost_pass)
+
+    def test_market_none_identical_to_default(self):
+        """market_center=None이면 기존 기본 경로와 필드별 완전 동일."""
+        r_default = self._call()
+        r_none = self._call(market_center=None, market_segment='')
+        self.assertEqual(r_default, r_none)  # dataclass 필드 전체 비교
+        # 기본 경로 기대값 (기존 계산식 하드코딩 검증)
+        self.assertEqual(r_default.optimal_bid, round(self.A + 0.9 * (self.BASE - self.A)))
+        self.assertEqual(r_default.optimal_bid, 455_000_000)
+        self.assertEqual(r_default.optimal_score, 80.0)  # max_score 유지
+        self.assertEqual(r_default.band_low, 454_550_000)
+        self.assertEqual(r_default.band_high, 455_450_000)
+        self.assertEqual(r_default.floor_rate_bid, 453_852_501)
+        # 신규 필드 기본값
+        self.assertFalse(r_default.market_based)
+        self.assertIsNone(r_default.market_center)
+        self.assertEqual(r_default.market_segment, '')
+
+    def test_market_optimal_score_below_max(self):
+        """market 모드 optimal_score는 실제 엔진 점수 — 90% 이탈 시 max 미만."""
+        from g2b.services.bid_engine import calc_price_score
+        result = self._call(market_center=92.0)
+        expected = float(calc_price_score(
+            result.optimal_bid, self.BASE, self.A, TableType.TABLE_3
+        ).score)
+        self.assertEqual(result.optimal_score, expected)
+        self.assertLess(result.optimal_score, 80.0)  # TABLE_3 max_score=80
+
+
+class TestMarketServing(TestCase):
+    """Stage C: 시장 정책 serving 연결 테스트 (MARKET_RECOMMEND_ENABLED 플래그).
+
+    - 플래그 ON + 정책 존재 → marketApplied=True, 추천 금액이 주입 center 반영
+    - 플래그 OFF → 기존 payload와 하위호환 (marketApplied=False, 90% 계산식)
+    - similar.applied는 확정/pending 응답 모두에 존재
+    """
+
+    BASE = 490_000_000
+    A_TOTAL = 2_350_000  # fixture A값 7항목 합계
+    PRESUME = 500_000_000
+
+    _FAKE_STATS = {
+        'count': 120,
+        'avg_bidder_cnt': 250.0,
+        'p10_rate': 88.5,
+        'p50_rate': 89.9,
+        'p90_rate': 91.2,
+    }
+
+    @classmethod
+    def setUpTestData(cls):
+        from g2b.models import BidApiAValue, BidApiPrelimPrice
+
+        # 공고 1: A+base 모두 confirmed (시장 정책 적용 대상)
+        BidAnnouncement.objects.create(
+            bid_ntce_no='TEST-MKT-001',
+            bid_ntce_ord='00',
+            bid_ntce_nm='시장 정책 테스트 공고',
+            presume_price=cls.PRESUME,
+        )
+        BidContract.objects.create(
+            bid_ntce_no='TEST-MKT-001',
+            bid_ntce_ord='00',
+            contract_no='NOTICE',
+            procurement_type='공사',
+            win_method='적격심사제',
+            presume_price=cls.PRESUME,
+        )
+        BidApiAValue.objects.create(
+            bid_ntce_no='TEST-MKT-001',
+            bid_ntce_ord='00',
+            national_pension=1000000,
+            health_insurance=500000,
+            retirement_mutual_aid=300000,
+            long_term_care=100000,
+            occupational_safety=200000,
+            safety_management=150000,
+            quality_management=100000,
+        )
+        BidApiPrelimPrice.objects.create(
+            bid_ntce_no='TEST-MKT-001',
+            bid_ntce_ord='00',
+            sequence_no=0,
+            base_amount=cls.BASE,
+        )
+
+        # 공고 2: A값 없음 → pending 응답
+        BidAnnouncement.objects.create(
+            bid_ntce_no='TEST-MKT-NOA-001',
+            bid_ntce_ord='00',
+            bid_ntce_nm='시장 정책 테스트 공고 (A값 없음)',
+            presume_price=cls.PRESUME,
+        )
+        BidContract.objects.create(
+            bid_ntce_no='TEST-MKT-NOA-001',
+            bid_ntce_ord='00',
+            contract_no='NOTICE',
+            procurement_type='공사',
+            win_method='적격심사제',
+            presume_price=cls.PRESUME,
+        )
+        BidApiPrelimPrice.objects.create(
+            bid_ntce_no='TEST-MKT-NOA-001',
+            bid_ntce_ord='00',
+            sequence_no=0,
+            base_amount=cls.BASE,
+        )
+
+    @staticmethod
+    def _fake_policy(center=92.0, segment_id='T3_C200+'):
+        from g2b.services.market_policy import MarketPolicy
+        return MarketPolicy(
+            segment_id=segment_id,
+            center=center,
+            ratio_low=center - 1.5,
+            ratio_high=center + 1.5,
+            confidence=0.9,
+            sample_n=5000,
+        )
+
+    def _get(self, bid_ntce_no='TEST-MKT-001'):
+        resp = self.client.get(
+            '/api/ui/notices/recommendation/', {'bid_ntce_no': bid_ntce_no}
+        )
+        self.assertEqual(resp.status_code, 200)
+        return resp.json()
+
+    def test_flag_on_policy_applied(self):
+        """플래그 ON + 정책 존재 → marketApplied=True, 금액에 center 반영."""
+        from unittest.mock import patch
+        from django.test import override_settings
+
+        policy = self._fake_policy(center=92.0)
+        with override_settings(MARKET_RECOMMEND_ENABLED=True), \
+                patch('g2b.ui_api.get_similar_bid_stats', return_value=dict(self._FAKE_STATS)), \
+                patch('g2b.ui_api.get_market_policy', return_value=policy) as mock_policy:
+            data = self._get()
+
+        self.assertTrue(data['judgement']['marketApplied'])
+        self.assertEqual(data['judgement']['marketSegment'], 'T3_C200+')
+        self.assertEqual(data['judgement']['marketCenter'], '92.00%')
+        self.assertTrue(data['similar']['applied'])
+
+        # 추천 금액 = round(center% × 기초금액) — floor 클램프 없는 케이스
+        expected_bid = round(92.0 / 100 * self.BASE)  # 450,800,000
+        self.assertGreaterEqual(expected_bid, data['floorRateBidValue'])
+        base_card = next(c for c in data['strategies'] if c['key'] == 'base')
+        self.assertEqual(base_card['amount'], f'₩ {expected_bid:,}')
+        self.assertIn('T3_C200+', base_card['reason'])
+        self.assertEqual(base_card['expectedRange'], '시장 중앙값 기반')
+
+        # 정책 조회에 avg_bidder_cnt/추정가격이 전달되는지 확인
+        mock_policy.assert_called_once()
+        call_args = mock_policy.call_args.args
+        self.assertEqual(call_args[1], 250.0)
+        self.assertEqual(call_args[2], self.PRESUME)
+
+    def test_flag_off_backward_compatible(self):
+        """플래그 OFF → 정책 미조회 + 기존 90% 계산식 payload 유지."""
+        from unittest.mock import patch
+        from django.test import override_settings
+
+        with override_settings(MARKET_RECOMMEND_ENABLED=False), \
+                patch('g2b.ui_api.get_similar_bid_stats', return_value=dict(self._FAKE_STATS)), \
+                patch('g2b.ui_api.get_market_policy') as mock_policy:
+            data = self._get()
+
+        mock_policy.assert_not_called()
+        self.assertFalse(data['judgement']['marketApplied'])
+        self.assertEqual(data['judgement']['marketSegment'], '')
+        self.assertEqual(data['judgement']['marketCenter'], '-')
+        self.assertFalse(data['similar']['applied'])
+
+        # 기존 90% 계산식 금액 그대로
+        expected_bid = round(self.A_TOTAL + 0.9 * (self.BASE - self.A_TOTAL))  # 441,235,000
+        base_card = next(c for c in data['strategies'] if c['key'] == 'base')
+        self.assertEqual(base_card['amount'], f'₩ {expected_bid:,}')
+        self.assertEqual(base_card['expectedRange'], '90% 고정')
+        # 기본 모드는 만점 유지 (TABLE_3 max 80)
+        self.assertEqual(data['judgement']['priceScore'], '80.00')
+
+    def test_flag_on_policy_none_falls_back(self):
+        """플래그 ON이지만 게이트 미통과(None) → 기존 90% 기본안 폴백."""
+        from unittest.mock import patch
+        from django.test import override_settings
+
+        with override_settings(MARKET_RECOMMEND_ENABLED=True), \
+                patch('g2b.ui_api.get_similar_bid_stats', return_value=dict(self._FAKE_STATS)), \
+                patch('g2b.ui_api.get_market_policy', return_value=None) as mock_policy:
+            data = self._get()
+
+        mock_policy.assert_called_once()
+        self.assertFalse(data['judgement']['marketApplied'])
+        self.assertFalse(data['similar']['applied'])
+        expected_bid = round(self.A_TOTAL + 0.9 * (self.BASE - self.A_TOTAL))
+        base_card = next(c for c in data['strategies'] if c['key'] == 'base')
+        self.assertEqual(base_card['amount'], f'₩ {expected_bid:,}')
+
+    def test_similar_applied_in_pending_payload(self):
+        """pending 응답(isExact=False)의 similar도 applied=False 포함."""
+        data = self._get('TEST-MKT-NOA-001')
+        self.assertFalse(data['isExact'])
+        self.assertEqual(data['similar'], {'applied': False})

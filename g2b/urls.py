@@ -26,4 +26,7 @@ urlpatterns = [
     path('legacy/recommend/', views.recommend, name='legacy_recommend'),
     path('legacy/ai-report/', views.ai_report, name='legacy_ai_report'),
     path('legacy/benchmark/', views.benchmark, name='legacy_benchmark'),
+    # 레거시 템플릿 역참조용: base.html/recommend.html이 'g2b:recommend', 'g2b:ai_report' 사용
+    path('legacy/recommend/form/', views.recommend, name='recommend'),
+    path('legacy/ai-report/form/', views.ai_report, name='ai_report'),
 ]

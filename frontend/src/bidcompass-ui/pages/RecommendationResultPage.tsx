@@ -268,7 +268,7 @@ export function RecommendationResultPage(): JSX.Element {
                   <div className="bc-range-head">
                     <div>
                       <div className="bc-range-title">추천 투찰률 위치</div>
-                      <div className="bc-range-desc">선택한 전략의 위치를 최근 유사 공고 분포 위에 표시합니다.</div>
+                      <div className="bc-range-desc">선택한 전략의 상대적 위치입니다(보수 ↔ 공격).</div>
                     </div>
                     <strong>{selected?.rate ?? '-'}</strong>
                   </div>

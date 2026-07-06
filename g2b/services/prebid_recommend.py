@@ -19,6 +19,7 @@ from typing import Optional
 from g2b.services.bid_engine import (
     TABLE_PARAMS_MAP,
     TableType,
+    calc_price_score,
     get_floor_rate,
 )
 from g2b.services.net_cost_estimator import estimate_net_construction_cost
@@ -53,6 +54,9 @@ class PreBidResult:
     net_cost_threshold: int     # 순공사원가 × 98% (실질 바닥가)
     net_cost_pass: bool         # 최적 투찰가가 순공사원가 기준 통과 여부
     net_cost_estimated: bool    # 순공사원가 추정값 사용 여부
+    market_based: bool = False              # 시장 중앙 투찰률 기반 여부
+    market_center: Optional[float] = None   # 적용된 시장 중앙 투찰률 (bid/예정가격 %)
+    market_segment: str = ''                # 적용된 시장 세그먼트 ID
 
 
 def prebid_recommend(
@@ -61,11 +65,17 @@ def prebid_recommend(
     table_type: TableType,
     presume_price: int,
     net_construction_cost: Optional[int] = None,
+    market_center: Optional[float] = None,
+    market_segment: str = '',
 ) -> PreBidResult:
     """사전 투찰 추천.
 
     기초금액 기반으로 최적 투찰금액과 safe/aggressive 밴드를 계산한다.
     복수예비가격이나 시나리오 시뮬레이션 없음.
+
+    market_center가 주어지면 (bid/예정가격 % 단위) 90% 계산식 대신
+    시장 중앙 투찰률 중심으로 최적가/밴드를 재계산한다.
+    하한율/순공사원가 바닥 제약(effective_floor)은 시장값보다 항상 우선한다.
     """
     if table_type == TableType.OUT_OF_SCOPE:
         raise ValueError("OUT_OF_SCOPE는 추천 대상이 아님")
@@ -80,19 +90,27 @@ def prebid_recommend(
     max_score = float(params.max_score)
     coeff = float(params.coeff)
 
-    # ── 1) 최적 투찰금액: ratio 0.9000 ──
-    optimal_bid = round(a + 0.9 * (est - a))
+    market_based = market_center is not None
 
-    # ── 2) 밴드 계산 ──
+    # ── 2) 밴드 반폭 (모드 공통) ──
     # score = max - coeff * |90 - ratio*100|
     # |90 - ratio*100| ≤ tolerance / coeff
     half_width_pct = _BAND_SCORE_TOLERANCE / coeff  # %p 단위
 
-    band_ratio_low = (90.0 - half_width_pct) / 100.0
-    band_ratio_high = (90.0 + half_width_pct) / 100.0
+    if market_based:
+        # ── 시장 모드: 예가% 공간에서 market_center 중심으로 계산 (폭 동일) ──
+        optimal_bid = round(market_center / 100 * est)
+        band_low_raw = round((market_center - half_width_pct) / 100 * est)
+        band_high_raw = round((market_center + half_width_pct) / 100 * est)
+    else:
+        # ── 1) 최적 투찰금액: ratio 0.9000 ──
+        optimal_bid = round(a + 0.9 * (est - a))
 
-    band_low_raw = round(a + band_ratio_low * (est - a))
-    band_high_raw = round(a + band_ratio_high * (est - a))
+        band_ratio_low = (90.0 - half_width_pct) / 100.0
+        band_ratio_high = (90.0 + half_width_pct) / 100.0
+
+        band_low_raw = round(a + band_ratio_low * (est - a))
+        band_high_raw = round(a + band_ratio_high * (est - a))
 
     # ── 3) 하한율 ──
     floor_rate = get_floor_rate(presume_price)
@@ -115,7 +133,11 @@ def prebid_recommend(
     # ── 5) 바닥 제약 적용 ──
     effective_floor = max(floor_bid or 0, floor_rate_bid)
     band_low = max(band_low_raw, effective_floor)
-    band_high = band_high_raw
+    if market_based:
+        # 시장 모드: 밴드 뒤집힘 방지 (band_low ≤ band_high 불변식 보장)
+        band_high = max(band_high_raw, band_low)
+    else:
+        band_high = band_high_raw
 
     # ── 6) safe / aggressive ──
     safe_bid = band_high
@@ -128,9 +150,15 @@ def prebid_recommend(
     floor_rate_pass = optimal_bid >= floor_rate_bid
     net_cost_pass = net_cost_threshold == 0 or optimal_bid >= net_cost_threshold
 
+    if market_based:
+        # 시장 모드: 90% 이탈 비용을 가시화하기 위해 실제 가격점수 노출
+        optimal_score = float(calc_price_score(optimal_bid, est, a, table_type).score)
+    else:
+        optimal_score = max_score
+
     return PreBidResult(
         optimal_bid=optimal_bid,
-        optimal_score=max_score,
+        optimal_score=optimal_score,
         safe_bid=safe_bid,
         aggressive_bid=aggressive_bid,
         band_low=band_low,
@@ -143,4 +171,7 @@ def prebid_recommend(
         net_cost_threshold=net_cost_threshold,
         net_cost_pass=net_cost_pass,
         net_cost_estimated=net_cost_estimated,
+        market_based=market_based,
+        market_center=market_center,
+        market_segment=market_segment if market_based else '',
     )
